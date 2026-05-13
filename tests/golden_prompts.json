@@ -1,0 +1,27 @@
+[
+  {
+    "prompt": "Find remote QA jobs in Japan",
+    "expected_action": "search_web",
+    "expected_module": "jobs"
+  },
+  {
+    "prompt": "Show my job applications",
+    "expected_action": "read_data",
+    "expected_module": "jobs"
+  },
+  {
+    "prompt": "Add expense $50 lunch today",
+    "expected_action": "save_data",
+    "expected_module": "finance"
+  },
+  {
+    "prompt": "I want to track freelance clients",
+    "expected_action": "create_module",
+    "expected_module": null
+  },
+  {
+    "prompt": "Summarize my course data",
+    "expected_action": "summarize",
+    "expected_module": "learning"
+  }
+]

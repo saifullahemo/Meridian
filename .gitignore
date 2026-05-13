@@ -1,0 +1,47 @@
+# Environment
+.env
+
+# Logs
+*.log
+
+# Data (your personal files - never in git)
+# NOTE: keep this broad; only commit templates/schemas if needed.
+data/
+
+# SQLite databases
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Build artifacts
+__pypackages__/
+build/
+dist/
+*.egg-info/
+*.whl
+
+# Node / frontend
+node_modules/
+frontend-react/node_modules/
+frontend/node_modules/
+
+frontend-react/dist/
+frontend/dist/
+
+# Playwright
+playwright-report/
+
+# Mac
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+

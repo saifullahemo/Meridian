@@ -1,0 +1,301 @@
+{
+  "version": "1.0",
+  "modules": {
+    "jobs": {
+      "label": "Job Applications",
+      "icon": "\ud83d\udcbc",
+      "description": "Track all job applications across companies and countries",
+      "fields": [
+        {
+          "name": "company",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "position",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "date_applied",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "applied",
+            "viewed",
+            "responded",
+            "interview",
+            "offer",
+            "rejected",
+            "withdrawn"
+          ]
+        },
+        {
+          "name": "salary_range",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "resume_used",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "sources": [
+        "linkedin",
+        "indeed",
+        "glassdoor",
+        "company_site",
+        "email",
+        "manual"
+      ],
+      "auto_scan": false,
+      "schedule": null,
+      "excel_file": "jobs.xlsx"
+    },
+    "finance": {
+      "label": "Finance",
+      "icon": "\ud83d\udcb0",
+      "description": "Track income, expenses, savings, and investments",
+      "fields": [
+        {
+          "name": "date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "type",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "income",
+            "expense",
+            "saving",
+            "investment"
+          ]
+        },
+        {
+          "name": "amount",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "currency",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "category",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "sources": [
+        "manual",
+        "email"
+      ],
+      "auto_scan": false,
+      "schedule": null,
+      "excel_file": "finance.xlsx"
+    },
+    "health": {
+      "label": "Health",
+      "icon": "\ud83c\udfe5",
+      "description": "Track medical appointments, medications, and wellness",
+      "fields": [
+        {
+          "name": "date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "type",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "appointment",
+            "medication",
+            "workout",
+            "symptom",
+            "measurement"
+          ]
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "doctor",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "next_date",
+          "type": "date",
+          "required": false
+        }
+      ],
+      "sources": [
+        "manual",
+        "email"
+      ],
+      "auto_scan": false,
+      "schedule": null,
+      "excel_file": "health.xlsx"
+    },
+    "learning": {
+      "label": "Learning",
+      "icon": "\ud83d\udcda",
+      "description": "Track courses, books, certifications, and skills",
+      "fields": [
+        {
+          "name": "title",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "type",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "course",
+            "book",
+            "certification",
+            "tutorial",
+            "skill"
+          ]
+        },
+        {
+          "name": "platform",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "planned",
+            "in_progress",
+            "completed",
+            "paused"
+          ]
+        },
+        {
+          "name": "start_date",
+          "type": "date",
+          "required": false
+        },
+        {
+          "name": "end_date",
+          "type": "date",
+          "required": false
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "priority",
+          "type": "enum",
+          "required": false,
+          "options": [
+            "low",
+            "medium",
+            "high"
+          ]
+        }
+      ],
+      "sources": [
+        "manual"
+      ],
+      "auto_scan": false,
+      "schedule": null,
+      "excel_file": "learning.xlsx"
+    },
+    "client_name": {
+      "label": "Client Name",
+      "icon": "",
+      "description": "Name of the client",
+      "fields": [
+        {
+          "name": "client_name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "email",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "phone_number",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "project_start_date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "options": [
+            "pending",
+            "in_progress",
+            "completed"
+          ],
+          "required": true
+        }
+      ],
+      "sources": [
+        "manual"
+      ],
+      "excel_file": "client_name.xlsx",
+      "auto_scan": false,
+      "schedule": null
+    }
+  },
+  "scheduler": {
+    "tasks": []
+  },
+  "ai_behavior": {
+    "default_model": "llama3.2",
+    "memory_length": 20,
+    "language": "english",
+    "timezone": "auto"
+  }
+}

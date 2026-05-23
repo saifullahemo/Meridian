@@ -60,6 +60,15 @@ def init_memory_table():
                 created_at TEXT    DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id TEXT PRIMARY KEY,
+                title      TEXT NOT NULL,
+                auto_title INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         _ensure_column(conn, "semantic_memory", "embedding_provider", "TEXT NOT NULL DEFAULT 'local'")
         _ensure_column(conn, "semantic_memory", "embedding_dimensions", "INTEGER NOT NULL DEFAULT 128")
         conn.commit()
@@ -80,6 +89,7 @@ def save_message(session_id: str, role: str, content: str, action: str = None):
         action:     Optional action type (search_web, save_data etc)
     """
     init_memory_table()
+    ensure_session(session_id, content if role == "user" else "")
     with _get_conn() as conn:
         cursor = conn.execute(
             "INSERT INTO conversation_memory (session_id, role, content, action) VALUES (?,?,?,?)",
@@ -106,6 +116,43 @@ def save_message(session_id: str, role: str, content: str, action: str = None):
                 ),
             )
         conn.commit()
+
+
+def ensure_session(session_id: str, first_user_message: str = ""):
+    init_memory_table()
+    title = _title_from_message(first_user_message) if first_user_message else session_id
+    with _get_conn() as conn:
+        existing = conn.execute(
+            "SELECT title, auto_title FROM chat_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO chat_sessions (session_id, title, auto_title) VALUES (?, ?, ?)",
+                (session_id, title, 1),
+            )
+        conn.commit()
+
+
+def rename_session(session_id: str, title: str) -> dict:
+    clean = _clean_title(title)
+    if not clean:
+        raise ValueError("Chat title cannot be empty.")
+    init_memory_table()
+    with _get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_sessions (session_id, title, auto_title, updated_at)
+            VALUES (?, ?, 0, CURRENT_TIMESTAMP)
+            ON CONFLICT(session_id) DO UPDATE SET
+                title = excluded.title,
+                auto_title = 0,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (session_id, clean),
+        )
+        conn.commit()
+    return {"session_id": session_id, "title": clean, "auto_title": False}
 
 
 def save_exchange(session_id: str, user_msg: str, ai_msg: str, action: str = None):
@@ -164,15 +211,45 @@ def get_all_sessions() -> list[dict]:
     init_memory_table()
     with _get_conn() as conn:
         rows = conn.execute(
-            """SELECT session_id,
-                      COUNT(*) as message_count,
-                      MIN(created_at) as started_at,
-                      MAX(created_at) as last_at
-               FROM conversation_memory
-               GROUP BY session_id
-               ORDER BY last_at DESC"""
+            """
+            SELECT grouped.session_id,
+                   COALESCE(meta.title, grouped.session_id) as title,
+                   COALESCE(meta.auto_title, 1) as auto_title,
+                   grouped.message_count,
+                   grouped.started_at,
+                   grouped.last_at
+            FROM (
+                SELECT session_id,
+                       COUNT(*) as message_count,
+                       MIN(created_at) as started_at,
+                       MAX(created_at) as last_at
+                FROM conversation_memory
+                GROUP BY session_id
+            ) grouped
+            LEFT JOIN chat_sessions meta ON meta.session_id = grouped.session_id
+            ORDER BY grouped.last_at DESC
+            """
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _clean_title(title: str) -> str:
+    return " ".join((title or "").split())[:80]
+
+
+def _title_from_message(message: str) -> str:
+    text = _clean_title(message)
+    if not text:
+        return "New chat"
+    stop_prefixes = ["please ", "can you ", "could you ", "i want to ", "help me "]
+    lower = text.lower()
+    for prefix in stop_prefixes:
+        if lower.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+    if len(text) > 52:
+        text = text[:49].rstrip() + "..."
+    return text[:1].upper() + text[1:] if text else "New chat"
 
 
 # ─────────────────────────────────────────────

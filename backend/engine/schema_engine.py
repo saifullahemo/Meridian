@@ -152,6 +152,22 @@ def remove_field(module_key: str, field_name: str):
     print(f"Field '{field_name}' removed from module '{module_key}'.")
 
 
+def update_module(module_key: str, schema: dict) -> dict:
+    """Update a module definition while preserving its key and existing data."""
+    if not module_exists(module_key):
+        raise ValueError(f"Module '{module_key}' does not exist.")
+    schema = _validate_schema(schema)
+    config = load_config()
+    previous = config["modules"][module_key]
+    schema["excel_file"] = previous.get("excel_file", f"{module_key}.xlsx")
+    schema["sources"] = schema.get("sources", previous.get("sources", ["manual"]))
+    schema["auto_scan"] = schema.get("auto_scan", previous.get("auto_scan", False))
+    schema["schedule"] = schema.get("schedule", previous.get("schedule"))
+    config["modules"][module_key] = schema
+    save_config(config)
+    return schema
+
+
 def delete_module(module_key: str):
     """Delete a module entirely."""
     if not module_exists(module_key):
@@ -161,6 +177,22 @@ def delete_module(module_key: str):
     del config["modules"][module_key]
     save_config(config)
     print(f"Module '{module_key}' deleted.")
+
+
+def create_module_from_schema(module_key: str, schema: dict) -> dict:
+    """Create a module from an explicit schema without asking the model."""
+    if module_exists(module_key):
+        raise ValueError(f"Module '{module_key}' already exists.")
+    schema = _validate_schema(schema)
+    schema["excel_file"] = schema.get("excel_file", f"{module_key}.xlsx")
+    schema["sources"] = schema.get("sources", ["manual"])
+    schema["auto_scan"] = schema.get("auto_scan", False)
+    schema["schedule"] = schema.get("schedule")
+    config = load_config()
+    config["modules"][module_key] = schema
+    save_config(config)
+    _create_excel_file(module_key, schema)
+    return {module_key: schema}
 
 
 # ─────────────────────────────────────────────

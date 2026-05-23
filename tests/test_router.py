@@ -42,6 +42,21 @@ def test_detect_module(instruction, expected):
     assert router.detect_module(instruction, modules) == expected
 
 
+def test_detect_module_uses_dynamic_schema_terms():
+    modules = {
+        "pets": {
+            "label": "Pet Care",
+            "description": "Track vet visits and vaccines",
+            "fields": [
+                {"name": "pet_name", "type": "text", "required": True},
+                {"name": "vaccine_date", "type": "date", "required": False},
+            ],
+        }
+    }
+
+    assert router.detect_module("Show my vaccine dates for pet care", modules) == "pets"
+
+
 def test_golden_prompt_routes():
     path = Path(__file__).with_name("golden_prompts.json")
     cases = json.loads(path.read_text())

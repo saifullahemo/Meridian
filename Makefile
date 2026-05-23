@@ -1,4 +1,4 @@
-.PHONY: backend frontend frontend-react test lint typecheck eval install-backend install-frontend install-rag install-finetune playwright-install finetune-lora
+.PHONY: backend frontend frontend-react test lint typecheck eval install-backend install-frontend install-documents install-rag install-finetune playwright-install finetune-lora
 
 PYTHON ?= python3
 BACKEND_HOST ?= 127.0.0.1
@@ -11,11 +11,16 @@ install-backend:
 install-frontend:
 	cd frontend-react && npm install
 
+install-documents:
+	$(PYTHON) -m pip install -r requirements-documents.txt
+
 install-rag:
-	$(PYTHON) -m pip install -r requirements-rag.txt
+	@echo "Chroma/sentence-transformers need a Python version with torch and onnxruntime wheels, usually Python 3.12."
+	@echo "On Python 3.14, use the built-in SQLite vector store plus Ollama embeddings."
+	$(PYTHON) -m pip install chromadb==1.5.9
 
 install-finetune:
-	$(PYTHON) -m pip install -r requirements-finetune.txt
+	$(PYTHON) -m pip install torch transformers datasets peft accelerate
 
 playwright-install:
 	$(PYTHON) -m playwright install chromium

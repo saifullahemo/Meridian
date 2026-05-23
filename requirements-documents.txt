@@ -1,0 +1,15 @@
+# Optional but recommended document intelligence stack.
+# Install these when you want local OCR, Office parsing, and stronger PDF layout extraction.
+
+# PDF layout and fallback extraction
+PyMuPDF==1.24.14
+
+# OCR for scanned PDFs and images. Also install the system tesseract binary.
+Pillow==10.4.0
+pytesseract==0.3.13
+
+# PowerPoint extraction
+python-pptx==1.0.2
+
+# Better HTML cleanup for scraped/uploaded HTML
+beautifulsoup4==4.12.3

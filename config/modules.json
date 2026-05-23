@@ -287,6 +287,244 @@
       "excel_file": "client_name.xlsx",
       "auto_scan": false,
       "schedule": null
+    },
+    "job_posts": {
+      "label": "Job Post",
+      "icon": "\ud83d\udcdd",
+      "description": "tracks job postings",
+      "fields": [
+        {
+          "name": "job_title",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "company_name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "job_description",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "post_date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "open",
+            "closed",
+            "pending"
+          ]
+        },
+        {
+          "name": "job_type",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "full_time",
+            "part_time",
+            "contract"
+          ]
+        },
+        {
+          "name": "location",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "sources": [
+        "manual"
+      ],
+      "excel_file": "job_posts.xlsx",
+      "auto_scan": false,
+      "schedule": null
+    },
+    "daily_balance": {
+      "label": "Daily Work Life Balance",
+      "icon": "\ud83d\udd52",
+      "description": "tracks daily work and life balance",
+      "fields": [
+        {
+          "name": "work_hours",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "work_type",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "office",
+            "remote",
+            "hybrid"
+          ]
+        },
+        {
+          "name": "life_balance_rating",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "exercise_done",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "sleep_hours",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "meal_breaks",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "sources": [
+        "manual"
+      ],
+      "excel_file": "daily_balance.xlsx",
+      "auto_scan": false,
+      "schedule": null
+    },
+    "task_manager": {
+      "label": "Task Manager",
+      "icon": "\ud83d\udcdd",
+      "description": "tracks tasks and their status",
+      "fields": [
+        {
+          "name": "task_name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "task_description",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "due_date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "task_status",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "pending",
+            "in_progress",
+            "completed"
+          ]
+        },
+        {
+          "name": "priority_level",
+          "type": "enum",
+          "required": false,
+          "options": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "name": "assigned_to",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "sources": [
+        "manual"
+      ],
+      "excel_file": "task_manager.xlsx",
+      "auto_scan": false,
+      "schedule": null
+    },
+    "research_project": {
+      "label": "Research Project",
+      "icon": "\ud83d\udcda",
+      "description": "tracks research project details",
+      "fields": [
+        {
+          "name": "project_name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "start_date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "end_date",
+          "type": "date",
+          "required": false
+        },
+        {
+          "name": "project_status",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "planned",
+            "in_progress",
+            "completed",
+            "cancelled"
+          ]
+        },
+        {
+          "name": "research_topic",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "budget",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "is_published",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "sources": [
+        "manual"
+      ],
+      "excel_file": "research_project.xlsx",
+      "auto_scan": false,
+      "schedule": null
     }
   },
   "scheduler": {

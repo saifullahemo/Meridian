@@ -8,12 +8,23 @@ from urllib.parse import urlparse
 
 import requests
 
-from backend.core import brain, observability, prompt_templates, semantic, safeguards, vector_store
+from backend.core import brain, document_ingestion, observability, prompt_templates, semantic, safeguards, vector_store
 from backend.data import database
 
 CHUNK_CHARS = 1000
 CHUNK_OVERLAP = 150
 logger = observability.get_logger(__name__)
+
+
+def session_file_source(session_id: str, filename: str) -> str:
+    safe_session = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in session_id or "default")
+    safe_filename = (filename or "uploaded_file").replace("/", "_").replace("\\", "_")
+    return "session:" + safe_session + ":file:" + safe_filename
+
+
+def session_source_prefix(session_id: str) -> str:
+    safe_session = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in session_id or "default")
+    return "session:" + safe_session + ":"
 
 
 def _conn() -> sqlite3.Connection:
@@ -119,8 +130,20 @@ def ingest_text(source: str, text: str, source_type: str = "text", title: str | 
 
 def ingest_file(path: str | Path, source: str | None = None) -> dict:
     file_path = Path(path)
-    text = file_path.read_text(encoding="utf-8", errors="ignore")
-    return ingest_text(source or str(file_path), text, source_type="file", title=file_path.name)
+    extracted = document_ingestion.extract_path(file_path)
+    if not extracted.success:
+        return {
+            "source": source or str(file_path),
+            "source_type": "file",
+            "title": file_path.name,
+            "chunks": 0,
+            "warnings": extracted.warnings,
+            "vector_backend": vector_store.upsert_chunks([]),
+        }
+    result = ingest_text(source or str(file_path), extracted.text, source_type="file", title=file_path.name)
+    result["warnings"] = extracted.warnings
+    result["metadata"] = extracted.metadata
+    return result
 
 
 def ingest_url(url: str) -> dict:
@@ -132,7 +155,7 @@ def ingest_url(url: str) -> dict:
     return ingest_text(url, text, source_type="url", title=title)
 
 
-def retrieve(query: str, top_k: int = 5) -> list[dict]:
+def retrieve(query: str, top_k: int = 5, source_prefix: str | None = None) -> list[dict]:
     query_vector = semantic.embed_text(query)
     query_tokens = set(semantic.tokenize(query))
     external_rows = vector_store.query(query_vector, top_k * 4)
@@ -140,6 +163,11 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
         if external_rows:
             ids = [row["id"] for row in external_rows]
             placeholders = ", ".join(["?"] * len(ids))
+            values = ids
+            source_filter = ""
+            if source_prefix:
+                source_filter = " AND source LIKE ?"
+                values = values + [source_prefix + "%"]
             rows = conn.execute(
                 """
                 SELECT id, source, source_type, title, chunk_id, text, embedding,
@@ -148,16 +176,24 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
                 WHERE id IN (
                 """
                 + placeholders
-                + ")",
-                ids,
+                + ")"
+                + source_filter,
+                values,
             ).fetchall()
         else:
+            source_filter = ""
+            values = []
+            if source_prefix:
+                source_filter = " WHERE source LIKE ?"
+                values.append(source_prefix + "%")
             rows = conn.execute(
                 """
                 SELECT id, source, source_type, title, chunk_id, text, embedding,
                        embedding_provider, embedding_dimensions
                 FROM rag_chunks
                 """
+                + source_filter,
+                values,
             ).fetchall()
     scored = []
     for row in rows:
@@ -184,8 +220,8 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
     return _rerank(query, ranked)[:top_k]
 
 
-def answer(query: str, top_k: int = 5) -> dict:
-    passages = retrieve(query, top_k=top_k)
+def answer(query: str, top_k: int = 5, source_prefix: str | None = None) -> dict:
+    passages = retrieve(query, top_k=top_k, source_prefix=source_prefix)
     if not passages:
         return {
             "success": False,

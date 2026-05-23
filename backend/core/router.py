@@ -36,9 +36,27 @@ def route(instruction: str) -> dict:
     Tries AI first, falls back to keyword detection.
     """
     modules      = _load_modules()
+    try:
+        from backend.core import tools
+
+        tool_route = tools.route_with_tools(instruction, modules)
+        if tool_route:
+            observability.log_event(
+                logger,
+                "routing.tool_decision",
+                action=tool_route.get("action"),
+                module=tool_route.get("module"),
+                tool=tool_route.get("tool"),
+                confidence=tool_route.get("confidence"),
+            )
+            return tool_route
+    except Exception:
+        pass
     # Keyword detection runs first — fast and reliable
     module = detect_module(instruction, modules)
     action = detect_action_type(instruction)
+    if action == "create_module":
+        module = None
     observability.log_event(
         logger,
         "routing.decision",
@@ -77,6 +95,34 @@ def detect_module(instruction: str, modules: dict = None) -> str:
         modules = _load_modules()
 
     t = instruction.lower()
+
+    best_module = None
+    best_score = 0
+    for module_key, schema in modules.items():
+        terms = [module_key, schema.get("label", ""), schema.get("description", "")]
+        terms.extend(field.get("name", "") for field in schema.get("fields", []))
+        score = 0
+        phrases = {
+            str(term).replace("_", " ").lower().strip()
+            for term in terms
+            if str(term).strip()
+        }
+        for phrase in phrases:
+            if len(phrase) > 2 and phrase in t:
+                score += 4
+        parts = set()
+        for term in terms:
+            for part in str(term).replace("_", " ").lower().split():
+                if len(part) > 2:
+                    parts.add(part)
+        for part in parts:
+            if part in t:
+                score += 1
+        if score > best_score:
+            best_module = module_key
+            best_score = score
+    if best_module:
+        return best_module
 
     keyword_map = {
         "jobs":     ["job", "jobs", "apply", "applied", "application", "applications", "company", "position",

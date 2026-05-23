@@ -73,6 +73,8 @@ def test_read_handler_with_module(monkeypatch):
     assert result["meta"]["total"] == 1
     assert result["meta"]["returned"] == 1
     assert "latency_ms" in result["meta"]
+    assert result["meta"]["artifacts"][0]["type"] == "table"
+    assert result["meta"]["suggestions"]
 
 
 def test_read_handler_without_module_uses_chat(monkeypatch):
@@ -82,6 +84,34 @@ def test_read_handler_without_module_uses_chat(monkeypatch):
 
     assert result["success"] is True
     assert result["action"] == "chat"
+
+
+def test_read_handler_uses_session_uploaded_file_context(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(universal_agent.brain, "ask", lambda prompt, **kwargs: captured.setdefault("prompt", prompt) or "rewritten")
+    monkeypatch.setattr(
+        universal_agent.rag,
+        "retrieve",
+        lambda query, top_k=4, source_prefix=None: [
+            {
+                "title": "model.py",
+                "source": "session:test-session:file:model.py",
+                "chunk_id": 0,
+                "text": "def train_model(): use a CNN with Conv2D layers",
+            }
+        ],
+    )
+
+    result = universal_agent.execute(
+        route("read_data", None, raw_instruction="rewrite my uploaded code as CNN"),
+        context={"session_id": "test-session"},
+    )
+
+    assert result["success"] is True
+    assert result["action"] == "chat"
+    assert "Relevant uploaded files for this session" in captured["prompt"]
+    assert "Conv2D" in captured["prompt"]
 
 
 def test_update_handler(monkeypatch):
@@ -254,11 +284,25 @@ def test_export_handler(monkeypatch, tmp_path):
     assert result["data"]["file"] == str(export_path)
 
 
-def test_schedule_handler():
-    result = universal_agent.execute(route("schedule", frequency="daily"))
+def test_schedule_handler(monkeypatch):
+    created = {}
+
+    from backend.scheduler import proactive
+
+    def fake_create_task(name, instruction, frequency):
+        created["name"] = name
+        created["instruction"] = instruction
+        created["frequency"] = frequency
+        return {"id": 1, "name": name, "instruction": instruction, "frequency": frequency}
+
+    monkeypatch.setattr(proactive, "create_task", fake_create_task)
+
+    result = universal_agent.execute(route("schedule", raw_instruction="Every Monday search QA jobs"))
 
     assert result["success"] is True
     assert result["action"] == "schedule"
+    assert result["data"]["frequency"] == "weekly"
+    assert created["instruction"] == "Every Monday search QA jobs"
 
 
 def test_create_module_handler(monkeypatch):

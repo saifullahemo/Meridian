@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import type { ChatMessage } from './App';
 
 function truncate(s: string, n: number) {
@@ -9,14 +9,20 @@ function truncate(s: string, n: number) {
 export default function ConversationMode({
   apiBaseUrl,
   sessionId,
+  setSessionId,
 }: {
   apiBaseUrl: string;
   sessionId: string;
+  setSessionId: (sessionId: string) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessions, setSessions] = useState<any[]>([]);
+  const [renamingSession, setRenamingSession] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
   const [instruction, setInstruction] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -27,6 +33,71 @@ export default function ConversationMode({
   }, [messages, loading]);
 
   const apiRoot = useMemo(() => apiBaseUrl.replace(/\/$/, ''), [apiBaseUrl]);
+
+  const loadSessions = useCallback(async () => {
+    const res = await fetch(apiRoot + '/api/memory/sessions/list');
+    const json = await res.json();
+    if (res.ok && json.success) setSessions(json.sessions || []);
+  }, [apiRoot]);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(apiRoot + `/api/memory/${encodeURIComponent(sessionId)}`);
+      const json = await res.json();
+      if (!res.ok || !json.success) throw new Error(String(json.detail || json.message || 'Could not load chat history'));
+      const restored = (json.history || []).map((item: any): ChatMessage => ({
+        role: item.role === 'user' ? 'user' : item.role === 'system' ? 'system' : 'assistant',
+        content: String(item.content || ''),
+        action: item.action,
+      }));
+      setMessages(restored);
+    } catch (e: any) {
+      setMessages([]);
+      setError(String(e?.message || e || 'Could not load chat history'));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [apiRoot, sessionId]);
+
+  React.useEffect(() => {
+    loadSessions().catch(() => undefined);
+  }, [loadSessions]);
+
+  React.useEffect(() => {
+    loadHistory().catch(() => undefined);
+  }, [loadHistory]);
+
+  function newChat() {
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '');
+    const next = `chat_${stamp}`;
+    setSessionId(next);
+    setMessages([]);
+    setError(null);
+  }
+
+  function startRename(session: any) {
+    setRenamingSession(session.session_id);
+    setRenameValue(session.title || session.session_id);
+  }
+
+  async function saveRename() {
+    if (!renamingSession || !renameValue.trim()) return;
+    const res = await fetch(apiRoot + `/api/memory/sessions/${encodeURIComponent(renamingSession)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: renameValue.trim() }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.success) {
+      setError(String(json.detail || json.message || 'Could not rename chat'));
+      return;
+    }
+    setRenamingSession(null);
+    setRenameValue('');
+    await loadSessions();
+  }
 
   async function onSubmit() {
     const text = instruction.trim();
@@ -64,8 +135,11 @@ export default function ConversationMode({
           success: true,
           action: json.action,
           route: json.meta?.route,
+          artifacts: json.meta?.artifacts || [],
+          suggestions: json.meta?.suggestions || [],
         };
         setMessages((prev) => [...prev, assistant]);
+        loadSessions().catch(() => undefined);
       } else {
         res = await fetch(apiRoot + '/api/chat/stream', {
           method: 'POST',
@@ -73,6 +147,7 @@ export default function ConversationMode({
           body: JSON.stringify({ instruction: text, session_id: sessionId }),
         });
         await readStreamResponse(res);
+        loadSessions().catch(() => undefined);
       }
     } catch (e: any) {
       const assistant: ChatMessage = {
@@ -133,6 +208,8 @@ export default function ConversationMode({
               success: Boolean(data.success),
               action: data.action,
               route: data.meta?.route,
+              artifacts: data.meta?.artifacts || [],
+              suggestions: data.meta?.suggestions || [],
             }
           : msg
       )));
@@ -144,12 +221,65 @@ export default function ConversationMode({
   }
 
   return (
-    <div className="card panel">
+    <section className="chatWorkspace">
+      <aside className="chatSessions panel">
+        <div className="panelHeader">
+          <h2>Chats</h2>
+          <button className="btn primary" type="button" onClick={newChat}>New</button>
+        </div>
+        <div className="chatSessionList">
+          {!sessions.some((s) => s.session_id === sessionId) ? (
+            <button
+              className="chatSession active"
+              type="button"
+              onClick={() => setSessionId(sessionId)}
+            >
+              <strong>{sessionId}</strong>
+              <span>Current chat</span>
+            </button>
+          ) : null}
+          {sessions.map((session) => (
+            <div
+              key={session.session_id}
+              className={session.session_id === sessionId ? 'chatSession active' : 'chatSession'}
+            >
+              {renamingSession === session.session_id ? (
+                <>
+                  <input
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.currentTarget.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') saveRename().catch(() => undefined);
+                      if (e.key === 'Escape') setRenamingSession(null);
+                    }}
+                    autoFocus
+                  />
+                  <div className="chatSessionActions">
+                    <button className="btn primary" type="button" onClick={() => saveRename().catch(() => undefined)}>Save</button>
+                    <button className="btn secondary" type="button" onClick={() => setRenamingSession(null)}>Cancel</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <button className="chatSessionMain" type="button" onClick={() => setSessionId(session.session_id)}>
+                    <strong>{session.title || session.session_id}</strong>
+                    <span>{session.message_count} messages · {session.last_at || ''}</span>
+                  </button>
+                  <button className="chatRename" type="button" onClick={() => startRename(session)} title="Rename chat">Rename</button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      <div className="card panel">
       <div className="chat">
+        {historyLoading ? <div className="emptyState">Loading chat history...</div> : null}
         {messages.length === 0 ? (
           <div className="emptyState">
-            Ask anything, manage your data, or attach files for document-aware help.
-            <div className="hint">Without files, requests are routed to actions like save, read, search, summarize, and chat.</div>
+            Start this chat, or select an older chat from the left.
+            <div className="hint">Uploaded files stay attached to this session for later follow-up questions.</div>
           </div>
         ) : null}
 
@@ -167,6 +297,14 @@ export default function ConversationMode({
               <div className="routePill">{m.action}</div>
             ) : null}
             <div className="bubbleText">{m.content}</div>
+            {m.artifacts?.length ? <ArtifactList artifacts={m.artifacts} /> : null}
+            {m.suggestions?.length ? (
+              <div className="suggestionPills">
+                {m.suggestions.map((suggestion, i) => (
+                  <button key={i} type="button" onClick={() => setInstruction(suggestion)}>{suggestion}</button>
+                ))}
+              </div>
+            ) : null}
           </div>
         ))}
 
@@ -234,6 +372,90 @@ export default function ConversationMode({
           </div>
         ) : null}
       </div>
+      </div>
+    </section>
+  );
+}
+
+function ArtifactList({ artifacts }: { artifacts: any[] }) {
+  return (
+    <div className="artifactList">
+      {artifacts.map((artifact, index) => {
+        if (artifact.type === 'table') return <TableArtifact key={index} artifact={artifact} />;
+        if (artifact.type === 'chart') return <ChartArtifact key={index} artifact={artifact} />;
+        if (artifact.type === 'document') return <DocumentArtifact key={index} artifact={artifact} />;
+        return null;
+      })}
+    </div>
+  );
+}
+
+function TableArtifact({ artifact }: { artifact: any }) {
+  const [filter, setFilter] = React.useState('');
+  const rows = (artifact.rows || []).filter((row: any) => JSON.stringify(row).toLowerCase().includes(filter.toLowerCase()));
+  const columns = artifact.columns || Object.keys(rows[0] || {});
+  return (
+    <div className="artifactCard">
+      <div className="artifactHeader">
+        <strong>{artifact.title || 'Table'}</strong>
+        <span>{artifact.total || rows.length} rows</span>
+      </div>
+      <input value={filter} onChange={(e) => setFilter(e.currentTarget.value)} placeholder="Filter table" />
+      <div className="artifactTableWrap">
+        <table>
+          <thead>
+            <tr>{columns.map((column: string) => <th key={column}>{column}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.map((row: any, i: number) => (
+              <tr key={i}>{columns.map((column: string) => <td key={column}>{String(row[column] ?? '')}</td>)}</tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ChartArtifact({ artifact }: { artifact: any }) {
+  const series = artifact.series || [];
+  const max = Math.max(1, ...series.map((item: any) => Number(item.value) || 0));
+  return (
+    <div className="artifactCard">
+      <div className="artifactHeader">
+        <strong>{artifact.title || 'Chart'}</strong>
+        <span>{artifact.chart || 'bar'}</span>
+      </div>
+      <div className="chartBars">
+        {series.map((item: any, i: number) => (
+          <div className="chartBarRow" key={i}>
+            <span>{item.label}</span>
+            <div><b style={{ width: `${Math.max(5, (Number(item.value) / max) * 100)}%` }} /></div>
+            <em>{item.value}</em>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DocumentArtifact({ artifact }: { artifact: any }) {
+  function download() {
+    const blob = new Blob([artifact.content || ''], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = artifact.filename || 'document.md';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  return (
+    <div className="artifactCard">
+      <div className="artifactHeader">
+        <strong>{artifact.title || 'Document'}</strong>
+        <button className="btn secondary" type="button" onClick={download}>Download</button>
+      </div>
+      <pre className="documentPreview">{artifact.content}</pre>
     </div>
   );
 }

@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime
 
 from backend.core import brain
-from backend.core import observability, prompt_templates, safeguards
+from backend.core import artifacts, observability, prompt_templates, rag, safeguards
 from backend.data import database, excel_manager
 from backend.engine import schema_engine
 
@@ -53,10 +53,22 @@ def _resolve_module(module: str | None, raw: str) -> str | None:
         terms.extend(field.get("name", "") for field in schema.get("fields", []))
         terms.extend(common_aliases.get(key, []))
         score = 0
+        phrases = {
+            str(term).replace("_", " ").lower().strip()
+            for term in terms
+            if str(term).strip()
+        }
+        for phrase in phrases:
+            if len(phrase) > 2 and re.search(r"\b" + re.escape(phrase) + r"s?\b", text):
+                score += 4
+        parts = set()
         for term in terms:
             for part in str(term).replace("_", " ").lower().split():
-                if len(part) > 2 and re.search(r"\b" + re.escape(part) + r"s?\b", text):
-                    score += 1
+                if len(part) > 2:
+                    parts.add(part)
+        for part in parts:
+            if re.search(r"\b" + re.escape(part) + r"s?\b", text):
+                score += 1
         if score > best_score:
             best_module = key
             best_score = score
@@ -75,6 +87,18 @@ def _record_label(record: dict) -> str:
 
 def _preview_records(records: list[dict], limit: int = 8) -> list[dict]:
     return [{"id": rec.get("id"), "summary": _record_label(rec)} for rec in records[:limit]]
+
+
+def _module_hint() -> str:
+    modules = _load_modules()
+    labels = [
+        (schema.get("label") or key).strip()
+        for key, schema in modules.items()
+        if key
+    ]
+    if not labels:
+        return "Create a module first, then mention its name when you ask."
+    return "Mention one of these modules: " + ", ".join(labels[:12]) + "."
 
 
 def _is_all_request(raw: str) -> bool:
@@ -168,6 +192,25 @@ def _candidate_records(module: str, raw: str, limit: int = 500) -> list[dict]:
     return matched
 
 
+def _session_file_context(session_id: str, query: str, top_k: int = 4) -> str:
+    passages = rag.retrieve(query, top_k=top_k, source_prefix=rag.session_source_prefix(session_id))
+    if not passages:
+        return ""
+    lines = ["Relevant uploaded files for this session:"]
+    for index, passage in enumerate(passages, start=1):
+        lines.append(
+            "["
+            + str(index)
+            + "] "
+            + passage.get("title", passage.get("source", "uploaded_file"))
+            + "#"
+            + str(passage.get("chunk_id", ""))
+            + "\n"
+            + safeguards.truncate_text(passage.get("text", ""), 2000, "uploaded file context")
+        )
+    return "\n\n".join(lines)
+
+
 def _success(message, data=None, action="", meta=None):
     return {
         "success":   True,
@@ -177,6 +220,38 @@ def _success(message, data=None, action="", meta=None):
         "meta":      meta or {},
         "timestamp": datetime.now().isoformat(),
     }
+
+
+def _attach_response_artifacts(result: dict, module: str | None) -> None:
+    if not result.get("success"):
+        return
+    action = result.get("action", "")
+    data = result.get("data")
+    meta = result.setdefault("meta", {})
+    artifact_list = meta.setdefault("artifacts", [])
+    if isinstance(data, list) and data:
+        table = artifacts.table((module or "Results").replace("_", " ").title(), data)
+        if table:
+            artifact_list.append(table)
+        chart = artifacts.chart_for_records(module or "", data)
+        if chart and action in {"read_data", "search_web", "summarize", "analyze"}:
+            artifact_list.append(chart)
+    elif action in {"summarize", "analyze"} and isinstance(result.get("message"), str):
+        artifact_list.append(
+            artifacts.document(
+                (module or "Summary").replace("_", " ").title(),
+                result.get("message", ""),
+                filename=(module or "summary") + ".md",
+            )
+        )
+        try:
+            records = database.select(module, limit=50) if module else []
+            chart = artifacts.chart_for_records(module or "", records)
+            if chart:
+                artifact_list.append(chart)
+        except Exception:
+            pass
+    meta["suggestions"] = artifacts.suggestions(action, module)
 
 
 def _error(message):
@@ -251,6 +326,7 @@ def execute(route: dict, context: dict = None) -> dict:
 
     try:
         result = safeguards.run_with_timeout(lambda: handler(module, params, context))
+        _attach_response_artifacts(result, module)
         result.setdefault("meta", {})["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
         observability.log_event(
             logger,
@@ -325,8 +401,10 @@ def _handle_read(module, params, context):
                     try:
                         from backend.core import memory as mem
                         mem_context = mem.build_context(session_id, raw)
-                        if mem_context:
-                            prompt = prompt_templates.chat_prompt(raw, mem_context)
+                        file_context = _session_file_context(session_id, raw)
+                        combined_context = "\n\n".join(part for part in [mem_context, file_context] if part)
+                        if combined_context:
+                            prompt = prompt_templates.chat_prompt(raw, combined_context)
                     except Exception:
                         pass
 
@@ -372,7 +450,7 @@ def _handle_update(module, params, context):
     raw = params.get("raw_instruction", "")
     module = _resolve_module(module, raw)
     if not module:
-        return _error("I could not tell which area to update. Try mentioning jobs, finance, health, learning, or the module name.")
+        return _error("I could not tell which module to update. " + _module_hint())
 
     record_id = params.get("id") or params.get("record_id")
     if not record_id:
@@ -445,7 +523,7 @@ def _handle_delete(module, params, context):
     raw = params.get("raw_instruction", "")
     module = _resolve_module(module, raw)
     if not module:
-        return _error("I could not tell which area to delete from. Try mentioning jobs, finance, health, learning, or the module name.")
+        return _error("I could not tell which module to delete from. " + _module_hint())
 
     record_id = params.get("id") or params.get("record_id")
     if not record_id:
@@ -651,12 +729,35 @@ def _handle_export(module, params, context):
 
 
 def _handle_schedule(module, params, context):
+    from backend.scheduler import proactive
+
+    raw = params.get("raw_instruction") or ""
+    frequency = params.get("frequency") or _infer_frequency(raw)
+    name = params.get("name") or _schedule_name(raw)
+    task = proactive.create_task(name, raw or name, frequency)
     return _success(
-        "Schedule registered: " + params.get("frequency", "recurring") +
-        " task. Scheduler coming next.",
-        data=params,
+        "Scheduled task created: " + task["name"] + " (" + task["frequency"] + ").",
+        data=task,
         action="schedule",
     )
+
+
+def _infer_frequency(raw: str) -> str:
+    text = (raw or "").lower()
+    if "daily" in text or "every day" in text:
+        return "daily"
+    if "monthly" in text or "every month" in text:
+        return "monthly"
+    if "every" in text and any(day in text for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]):
+        return "weekly"
+    return "weekly"
+
+
+def _schedule_name(raw: str) -> str:
+    clean = " ".join((raw or "Scheduled task").split())
+    if len(clean) > 64:
+        clean = clean[:61].rstrip() + "..."
+    return clean[:1].upper() + clean[1:]
 
 
 def _handle_create_module(module, params, context):

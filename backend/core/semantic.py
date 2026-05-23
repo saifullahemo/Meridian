@@ -14,7 +14,9 @@ TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 EMBEDDING_PROVIDER = os.getenv("PERSONAL_OS_EMBEDDING_PROVIDER", "local").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", os.getenv("OLLAMA_MODEL", "llama3.2"))
+SENTENCE_TRANSFORMERS_MODEL = os.getenv("PERSONAL_OS_SENTENCE_TRANSFORMERS_MODEL", "BAAI/bge-small-en-v1.5")
 EMBEDDING_TIMEOUT_SECONDS = float(os.getenv("PERSONAL_OS_EMBEDDING_TIMEOUT_SECONDS", "15"))
+_SENTENCE_MODEL = None
 
 
 def tokenize(text: str) -> list[str]:
@@ -25,6 +27,11 @@ def embed_text(text: str, dimensions: int = DIMENSIONS) -> list[float]:
     if EMBEDDING_PROVIDER == "ollama":
         try:
             return _embed_ollama(text)
+        except Exception:
+            return _embed_local(text, dimensions)
+    if EMBEDDING_PROVIDER in {"sentence-transformers", "sentence_transformers", "st"}:
+        try:
+            return _embed_sentence_transformers(text)
         except Exception:
             return _embed_local(text, dimensions)
     return _embed_local(text, dimensions)
@@ -40,7 +47,38 @@ def embedding_dimensions() -> int:
             return len(_embed_ollama("dimension probe"))
         except Exception:
             return DIMENSIONS
+    if EMBEDDING_PROVIDER in {"sentence-transformers", "sentence_transformers", "st"}:
+        try:
+            return len(_embed_sentence_transformers("dimension probe"))
+        except Exception:
+            return DIMENSIONS
     return DIMENSIONS
+
+
+def status() -> dict:
+    provider = embedding_provider()
+    ready = True
+    error = ""
+    dimensions = DIMENSIONS
+    if provider == "ollama":
+        try:
+            dimensions = len(_embed_ollama("status probe"))
+        except Exception as exc:
+            ready = False
+            error = str(exc)
+    elif provider in {"sentence-transformers", "sentence_transformers", "st"}:
+        try:
+            dimensions = len(_embed_sentence_transformers("status probe"))
+        except Exception as exc:
+            ready = False
+            error = str(exc)
+    return {
+        "provider": provider,
+        "ready": ready,
+        "dimensions": dimensions,
+        "model": OLLAMA_EMBEDDING_MODEL if provider == "ollama" else SENTENCE_TRANSFORMERS_MODEL if provider in {"sentence-transformers", "sentence_transformers", "st"} else "local-hash",
+        "error": error,
+    }
 
 
 def _embed_local(text: str, dimensions: int = DIMENSIONS) -> list[float]:
@@ -70,6 +108,16 @@ def _embed_ollama(text: str) -> list[float]:
     if not vector:
         raise ValueError("Ollama did not return an embedding.")
     return _normalize([float(value) for value in vector])
+
+
+def _embed_sentence_transformers(text: str) -> list[float]:
+    global _SENTENCE_MODEL
+    if _SENTENCE_MODEL is None:
+        from sentence_transformers import SentenceTransformer
+
+        _SENTENCE_MODEL = SentenceTransformer(SENTENCE_TRANSFORMERS_MODEL)
+    vector = _SENTENCE_MODEL.encode(text, normalize_embeddings=True)
+    return [float(value) for value in vector.tolist()]
 
 
 def _normalize(vector: list[float]) -> list[float]:

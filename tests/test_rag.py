@@ -24,6 +24,20 @@ def test_ingest_and_retrieve_text(tmp_path, monkeypatch):
     assert hits[0]["citation"] == "notes.txt#0"
 
 
+def test_retrieve_can_filter_by_session_source_prefix(tmp_path, monkeypatch):
+    monkeypatch.setattr(rag.database, "DB_PATH", tmp_path / "rag-session.db")
+
+    source = rag.session_file_source("session-one", "model.py")
+    rag.ingest_text(source, "CNN rewrite uses Conv2D and MaxPooling.", source_type="session_file", title="model.py")
+    rag.ingest_text(rag.session_file_source("session-two", "other.py"), "Unrelated SQL notes.", source_type="session_file", title="other.py")
+
+    hits = rag.retrieve("CNN Conv2D", source_prefix=rag.session_source_prefix("session-one"))
+
+    assert hits
+    assert hits[0]["source"] == source
+    assert hits[0]["title"] == "model.py"
+
+
 def test_ingest_url_extracts_page_text(tmp_path, monkeypatch):
     monkeypatch.setattr(rag.database, "DB_PATH", tmp_path / "rag-url.db")
 

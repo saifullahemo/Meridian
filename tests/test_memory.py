@@ -30,6 +30,23 @@ def test_save_retrieve_search_and_build_context(tmp_path, monkeypatch):
     assert semantic_hits[0]["score"] > 0
 
 
+def test_chat_session_title_auto_and_rename(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory, "DB_PATH", tmp_path / "memory-title.db")
+
+    memory.save_message("chat-1", "user", "please rewrite my uploaded Python code as a CNN")
+    sessions = memory.get_all_sessions()
+
+    assert sessions[0]["title"] == "Rewrite my uploaded Python code as a CNN"
+    assert sessions[0]["auto_title"] == 1
+
+    renamed = memory.rename_session("chat-1", "CNN rewrite")
+    sessions = memory.get_all_sessions()
+
+    assert renamed["title"] == "CNN rewrite"
+    assert sessions[0]["title"] == "CNN rewrite"
+    assert sessions[0]["auto_title"] == 0
+
+
 def test_cleanup_older_than_removes_old_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(memory, "DB_PATH", tmp_path / "memory-retention.db")
     memory.save_message("session-1", "user", "old note")

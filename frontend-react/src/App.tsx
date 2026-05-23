@@ -2,10 +2,12 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ConversationMode from './ConversationMode';
 
 export type ChatMessage = {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   success?: boolean;
   action?: string;
+  artifacts?: any[];
+  suggestions?: string[];
   route?: {
     action?: string;
     module?: string | null;
@@ -31,17 +33,27 @@ type ModuleSchema = {
 
 type ModulesMap = Record<string, ModuleSchema>;
 type RecordRow = Record<string, string | number | boolean | null>;
+type ModuleDraft = {
+  key: string;
+  label: string;
+  description: string;
+  icon: string;
+  fields: Field[];
+};
 
 const modeLabels: Record<Mode, string> = {
-  dashboard: 'Dashboard',
-  resume: 'Resume',
+  dashboard: 'Home',
+  resume: 'Files',
   jobs: 'Jobs',
   chat: 'Chat',
-  data: 'Data',
-  rag: 'RAG',
+  data: 'Projects',
+  rag: 'Knowledge',
   memory: 'Memory',
-  observability: 'Observability',
+  observability: 'Logs',
 };
+
+const primaryModes: Mode[] = ['chat', 'data'];
+const toolModes: Mode[] = ['dashboard', 'rag', 'resume', 'memory', 'jobs', 'observability'];
 
 function todaySessionId() {
   return 'session_' + new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -60,7 +72,7 @@ async function readJson<T>(res: Response): Promise<T> {
 }
 
 export default function App() {
-  const [mode, setMode] = useState<Mode>('dashboard');
+  const [mode, setMode] = useState<Mode>('chat');
   const [sessionId, setSessionId] = useState<string>(() => {
     return localStorage.getItem('po_session_id') || todaySessionId();
   });
@@ -100,6 +112,8 @@ export default function App() {
       .catch((e) => setStatusText(e.message));
   }, [api, refreshModules]);
 
+  const pageTitle = mode === 'data' && activeModule ? modules[activeModule]?.label || modeLabels[mode] : modeLabels[mode];
+
   return (
     <div className="appShell">
       <aside className="sidebar">
@@ -107,12 +121,24 @@ export default function App() {
           <div className="brandMark">PO</div>
           <div>
             <div className="title">Personal OS</div>
-            <div className="subtitle">{statusText}</div>
+            <div className="subtitle">Local AI workspace</div>
           </div>
         </div>
 
-        <nav className="nav">
-          {(Object.keys(modeLabels) as Mode[]).map((item) => (
+        <nav className="nav" aria-label="Main navigation">
+          <div className="railLabel">Main</div>
+          {primaryModes.map((item) => (
+            <button
+              key={item}
+              className={mode === item ? 'navButton active' : 'navButton'}
+              type="button"
+              onClick={() => setMode(item)}
+            >
+              {modeLabels[item]}
+            </button>
+          ))}
+          <div className="railLabel navGroupLabel">Tools</div>
+          {toolModes.map((item) => (
             <button
               key={item}
               className={mode === item ? 'navButton active' : 'navButton'}
@@ -125,7 +151,7 @@ export default function App() {
         </nav>
 
         <div className="moduleRail">
-          <div className="railLabel">Modules</div>
+          <div className="railLabel">Projects</div>
           {Object.entries(modules).map(([key, mod]) => (
             <button
               key={key}
@@ -140,6 +166,22 @@ export default function App() {
               <strong>{counts[key] || 0}</strong>
             </button>
           ))}
+          <button
+            className={mode === 'data' && !activeModule ? 'moduleButton active' : 'moduleButton'}
+            type="button"
+            onClick={() => {
+              setActiveModule('');
+              setMode('data');
+            }}
+          >
+            <span>+ New project</span>
+            <strong>+</strong>
+          </button>
+        </div>
+
+        <div className={statusText.startsWith('AI online') ? 'statusPill online' : 'statusPill'}>
+          <span>{statusText.startsWith('AI online') ? 'Online' : 'Check'}</span>
+          <strong>{statusText.replace(/^AI online:?\s*/, '')}</strong>
         </div>
       </aside>
 
@@ -147,7 +189,7 @@ export default function App() {
         <header className="topbar">
           <div>
             <div className="eyebrow">{modeLabels[mode]}</div>
-            <h1>{mode === 'data' && activeModule ? modules[activeModule]?.label : modeLabels[mode]}</h1>
+            <h1>{pageTitle}</h1>
           </div>
           <label className="sessionControl">
             <span>Session</span>
@@ -162,12 +204,13 @@ export default function App() {
         ) : null}
         {mode === 'resume' ? <ResumeView api={api} /> : null}
         {mode === 'jobs' ? <JobsView api={api} sessionId={sessionId} /> : null}
-        {mode === 'chat' ? <ConversationMode apiBaseUrl={apiBase} sessionId={sessionId} /> : null}
+        {mode === 'chat' ? <ConversationMode apiBaseUrl={apiBase} sessionId={sessionId} setSessionId={setSessionId} /> : null}
         {mode === 'data' ? (
           <DataView
             api={api}
             modules={modules}
             moduleKey={activeModule}
+            setActiveModule={setActiveModule}
             onChanged={refreshModules}
           />
         ) : null}
@@ -234,11 +277,13 @@ function DataView({
   api,
   modules,
   moduleKey,
+  setActiveModule,
   onChanged,
 }: {
   api: (path: string) => string;
   modules: ModulesMap;
   moduleKey: string;
+  setActiveModule: (moduleKey: string) => void;
   onChanged: () => Promise<void>;
 }) {
   const schema = modules[moduleKey];
@@ -250,6 +295,15 @@ function DataView({
   const [form, setForm] = useState<Record<string, string | number | boolean>>({});
   const [editingId, setEditingId] = useState<string | number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showModuleEditor, setShowModuleEditor] = useState(false);
+  const [moduleEditorMode, setModuleEditorMode] = useState<'create' | 'edit'>('create');
+  const [moduleDraft, setModuleDraft] = useState({
+    key: '',
+    label: '',
+    description: '',
+    icon: '',
+    fields: defaultFields(),
+  });
 
   const loadRecords = useCallback(async () => {
     if (!moduleKey) return;
@@ -280,7 +334,129 @@ function DataView({
     loadRecords();
   }, [loadRecords]);
 
-  if (!schema) return <div className="emptyState">No module selected.</div>;
+  async function saveModule() {
+    setError(null);
+    try {
+      const isEdit = moduleEditorMode === 'edit' && Boolean(schema);
+      const key = isEdit ? moduleKey : moduleDraft.key;
+      const schemaPayload = schemaFromDraft(moduleDraft, schema);
+      await readJson(
+        await fetch(api(isEdit ? `/api/modules/${moduleKey}` : '/api/modules'), {
+          method: isEdit ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, schema: schemaPayload }),
+        }),
+      );
+      setShowModuleEditor(false);
+      await onChanged();
+      setActiveModule(key);
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
+
+  async function deleteModule() {
+    if (!schema || !moduleKey) return;
+    if (!window.confirm(`Delete ${schema.label || moduleKey} and its saved records?`)) return;
+    setError(null);
+    try {
+      await readJson(await fetch(api(`/api/modules/${moduleKey}?drop_data=true`), { method: 'DELETE' }));
+      setActiveModule('');
+      await onChanged();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    }
+  }
+
+  function openModuleEditor(createNew = false) {
+    if (createNew || !schema) {
+      setModuleEditorMode('create');
+      setModuleDraft({
+        key: '',
+        label: '',
+        description: '',
+        icon: '',
+        fields: defaultFields(),
+      });
+    } else {
+      setModuleEditorMode('edit');
+      setModuleDraft({
+        key: moduleKey,
+        label: schema.label || moduleKey,
+        description: schema.description || '',
+        icon: schema.icon || '',
+        fields: schema.fields.map((field) => ({ ...field, options: field.options ? [...field.options] : undefined })),
+      });
+    }
+    setShowModuleEditor(true);
+  }
+
+  function updateDraftField(index: number, patch: Partial<Field>) {
+    setModuleDraft((prev) => ({
+      ...prev,
+      fields: prev.fields.map((field, i) => i === index ? { ...field, ...patch } : field),
+    }));
+  }
+
+  function addDraftField() {
+    setModuleDraft((prev) => ({
+      ...prev,
+      fields: [...prev.fields, { name: '', type: 'text', required: false }],
+    }));
+  }
+
+  function removeDraftField(index: number) {
+    setModuleDraft((prev) => ({
+      ...prev,
+      fields: prev.fields.filter((_, i) => i !== index),
+    }));
+  }
+
+  if (!schema && !showModuleEditor) {
+    return (
+      <section className="dataLayout">
+        {error ? <div className="notice error">{error}</div> : null}
+        <div className="emptyState">No project selected. Create anything you want to track.</div>
+        <button className="btn primary" type="button" onClick={() => openModuleEditor(true)}>Create Project</button>
+      </section>
+    );
+  }
+
+  if (!schema) {
+    return (
+      <section className="dataLayout">
+        {error ? <div className="notice error">{error}</div> : null}
+        <div className="panel moduleEditor">
+          <div className="panelHeader">
+            <h2>Create Project</h2>
+          </div>
+          <div className="formPanel">
+            <label className="field">
+              <span>Key</span>
+              <input value={moduleDraft.key} onChange={(e) => setModuleDraft((prev) => ({ ...prev, key: e.currentTarget.value }))} placeholder="travel_plans" />
+            </label>
+            <label className="field">
+              <span>Label</span>
+              <input value={moduleDraft.label} onChange={(e) => setModuleDraft((prev) => ({ ...prev, label: e.currentTarget.value }))} placeholder="Travel Plans" />
+            </label>
+            <label className="field">
+              <span>Icon</span>
+              <input value={moduleDraft.icon} onChange={(e) => setModuleDraft((prev) => ({ ...prev, icon: e.currentTarget.value }))} placeholder="✈" />
+            </label>
+            <label className="field">
+              <span>Description</span>
+              <input value={moduleDraft.description} onChange={(e) => setModuleDraft((prev) => ({ ...prev, description: e.currentTarget.value }))} placeholder="Track anything you want" />
+            </label>
+            <ProjectFieldBuilder fields={moduleDraft.fields} onAdd={addDraftField} onRemove={removeDraftField} onChange={updateDraftField} />
+            <div className="formActions">
+              <button className="btn secondary" type="button" onClick={() => setShowModuleEditor(false)}>Cancel</button>
+              <button className="btn primary" type="button" onClick={saveModule}>Create Project</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   const statusField = schema.fields.find((field) => field.name === 'status' && field.options?.length);
   const columns = orderColumns(records);
@@ -333,6 +509,8 @@ function DataView({
         <button className="btn primary" type="button" onClick={() => setShowForm((value) => !value)}>
           {showForm ? 'Close' : 'Add'}
         </button>
+        <button className="btn secondary" type="button" onClick={() => openModuleEditor(false)}>Edit Project</button>
+        <button className="btn secondary" type="button" onClick={() => openModuleEditor(true)}>New Project</button>
       </div>
 
       <div className="metricGrid">
@@ -342,6 +520,38 @@ function DataView({
       </div>
 
       {error ? <div className="notice error">{error}</div> : null}
+
+      {showModuleEditor ? (
+        <div className="panel moduleEditor">
+          <div className="panelHeader">
+            <h2>{moduleEditorMode === 'edit' ? 'Edit Project' : 'Create Project'}</h2>
+            {moduleEditorMode === 'edit' ? <button className="btn secondary" type="button" onClick={deleteModule}>Delete Project</button> : null}
+          </div>
+          <div className="formPanel">
+            <label className="field">
+              <span>Key</span>
+              <input value={moduleDraft.key} disabled={moduleEditorMode === 'edit'} onChange={(e) => setModuleDraft((prev) => ({ ...prev, key: e.currentTarget.value }))} placeholder="travel_plans" />
+            </label>
+            <label className="field">
+              <span>Label</span>
+              <input value={moduleDraft.label} onChange={(e) => setModuleDraft((prev) => ({ ...prev, label: e.currentTarget.value }))} placeholder="Travel Plans" />
+            </label>
+            <label className="field">
+              <span>Icon</span>
+              <input value={moduleDraft.icon} onChange={(e) => setModuleDraft((prev) => ({ ...prev, icon: e.currentTarget.value }))} placeholder="✈" />
+            </label>
+            <label className="field">
+              <span>Description</span>
+              <input value={moduleDraft.description} onChange={(e) => setModuleDraft((prev) => ({ ...prev, description: e.currentTarget.value }))} placeholder="Track anything you want" />
+            </label>
+            <ProjectFieldBuilder fields={moduleDraft.fields} onAdd={addDraftField} onRemove={removeDraftField} onChange={updateDraftField} />
+            <div className="formActions">
+              <button className="btn secondary" type="button" onClick={() => setShowModuleEditor(false)}>Cancel</button>
+              <button className="btn primary" type="button" onClick={saveModule}>{moduleEditorMode === 'edit' ? 'Update Project' : 'Create Project'}</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showForm ? (
         <div className="panel formPanel">
@@ -546,12 +756,16 @@ function DashboardView({
   setActiveModule: (moduleKey: string) => void;
 }) {
   const [items, setItems] = useState<Array<{ key: string; module: ModuleSchema; count: number; recent: RecordRow[] }>>([]);
+  const [notifications, setNotifications] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(api('/api/dashboard'))
-      .then((res) => readJson<{ items: Array<{ key: string; module: ModuleSchema; count: number; recent: RecordRow[] }> }>(res))
-      .then((json) => setItems(json.items || []))
+      .then((res) => readJson<{ items: Array<{ key: string; module: ModuleSchema; count: number; recent: RecordRow[] }>; notifications?: any[] }>(res))
+      .then((json) => {
+        setItems(json.items || []);
+        setNotifications(json.notifications || []);
+      })
       .catch((e) => setError(e.message));
   }, [api]);
 
@@ -575,6 +789,38 @@ function DashboardView({
             <em>{item.module.label || item.key}</em>
           </button>
         ))}
+      </div>
+
+      <div className="proactiveBand">
+        <div className="panelHeader">
+          <h2>Proactive Intelligence</h2>
+          <button
+            className="btn secondary"
+            type="button"
+            onClick={() => {
+              fetch(api('/api/proactive/run'), { method: 'POST' })
+                .then(() => fetch(api('/api/dashboard')))
+                .then((res) => readJson<{ notifications?: any[]; items: any[] }>(res))
+                .then((json) => {
+                  setNotifications(json.notifications || []);
+                  setItems(json.items || []);
+                })
+                .catch((e) => setError(e.message));
+            }}
+          >
+            Scan Now
+          </button>
+        </div>
+        <div className="notificationGrid">
+          {notifications.map((item) => (
+            <div className={`notificationCard ${item.severity || 'info'}`} key={item.id}>
+              <strong>{item.title}</strong>
+              <p>{item.message}</p>
+              <span>{item.module || 'system'} · {item.suggested_action || 'Review'}</span>
+            </div>
+          ))}
+          {!notifications.length ? <div className="emptyState">No proactive alerts yet. Run a scan after adding data.</div> : null}
+        </div>
       </div>
 
       <div className="recentGrid">
@@ -1043,6 +1289,65 @@ function FieldInput({
   );
 }
 
+function ProjectFieldBuilder({
+  fields,
+  onAdd,
+  onRemove,
+  onChange,
+}: {
+  fields: Field[];
+  onAdd: () => void;
+  onRemove: (index: number) => void;
+  onChange: (index: number, patch: Partial<Field>) => void;
+}) {
+  return (
+    <div className="fieldBuilder">
+      <div className="fieldBuilderHeader">
+        <span>Fields</span>
+        <button className="btn secondary" type="button" onClick={onAdd}>Add Field</button>
+      </div>
+      {fields.map((field, index) => (
+        <div className="fieldRow" key={index}>
+          <input
+            value={field.name}
+            onChange={(e) => onChange(index, { name: e.currentTarget.value })}
+            placeholder="field_name"
+          />
+          <select
+            value={field.type}
+            onChange={(e) => {
+              const type = e.currentTarget.value as Field['type'];
+              onChange(index, { type, options: type === 'enum' ? field.options || ['planned', 'done'] : undefined });
+            }}
+          >
+            <option value="text">Text</option>
+            <option value="number">Number</option>
+            <option value="date">Date</option>
+            <option value="enum">Options</option>
+            <option value="boolean">Yes/No</option>
+          </select>
+          <label className="inlineToggle">
+            <input
+              type="checkbox"
+              checked={Boolean(field.required)}
+              onChange={(e) => onChange(index, { required: e.currentTarget.checked })}
+            />
+            <span>Required</span>
+          </label>
+          {field.type === 'enum' ? (
+            <input
+              value={(field.options || []).join(', ')}
+              onChange={(e) => onChange(index, { options: e.currentTarget.value.split(',').map((item) => item.trim()).filter(Boolean) })}
+              placeholder="planned, done"
+            />
+          ) : null}
+          <button className="iconButton" type="button" onClick={() => onRemove(index)} disabled={fields.length <= 1}>Remove</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="metric">
@@ -1070,6 +1375,38 @@ function recordToForm(record: RecordRow) {
     }
   }
   return next;
+}
+
+function schemaFromDraft(draft: ModuleDraft, existing?: ModuleSchema) {
+  return {
+    label: draft.label.trim() || existing?.label || 'Untitled Module',
+    icon: draft.icon.trim(),
+    description: draft.description.trim() || existing?.description || 'Custom module',
+    fields: draft.fields
+      .map((field) => {
+        const type = ['text', 'number', 'date', 'enum', 'boolean'].includes(field.type) ? field.type : 'text';
+        const next: Field = {
+          name: field.name.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, ''),
+          type,
+          required: Boolean(field.required),
+        };
+        if (type === 'enum') {
+          next.options = (field.options || []).map((item) => item.trim()).filter(Boolean);
+          if (!next.options.length) next.options = ['planned', 'done'];
+        }
+        return next;
+      })
+      .filter((field) => field.name),
+    sources: ['manual'],
+  };
+}
+
+function defaultFields(): Field[] {
+  return [
+    { name: 'title', type: 'text', required: true },
+    { name: 'status', type: 'enum', required: true, options: ['planned', 'in_progress', 'done'] },
+    { name: 'notes', type: 'text', required: false },
+  ];
 }
 
 function extractSkillHints(text: string) {

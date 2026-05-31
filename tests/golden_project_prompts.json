@@ -1,0 +1,26 @@
+[
+  {
+    "prompt": "Remember that I prefer short explanations",
+    "expected_type": "remember"
+  },
+  {
+    "prompt": "Rename this project to CNN Research",
+    "expected_type": "rename_project"
+  },
+  {
+    "prompt": "Show project files",
+    "expected_type": "list_files"
+  },
+  {
+    "prompt": "Show project memory",
+    "expected_type": "list_memory"
+  },
+  {
+    "prompt": "Search files for Conv2D layers",
+    "expected_type": "search_files"
+  },
+  {
+    "prompt": "Rewrite the uploaded code as a CNN",
+    "expected_type": "answer"
+  }
+]

@@ -1,10 +1,20 @@
 """
-core/brain.py
--------------
-AI Brain for Personal OS — powered by Groq.
-Uses Llama 3.3 70B via Groq API.
-Fast, free, and much more capable than local Ollama.
-Falls back to local Ollama if Groq is unavailable.
+backend/core/brain.py
+----------------------
+AI Brain for Personal OS.
+
+
+Implements:
+- ask(): single prompt
+- ask_json(): JSON-only response
+- ask_stream(): token streaming
+- ask_with_history(): chat with message history
+
+Environment:
+- GROQ_API_KEY for Groq
+- OLLAMA_BASE_URL / OLLAMA_MODEL for local Ollama fallback
+
+Groq uses the OpenAI-compatible Chat Completions API.
 """
 
 import os
@@ -15,90 +25,91 @@ from dotenv import load_dotenv
 from backend.core import observability, safeguards
 
 from pathlib import Path as _Path
+
 load_dotenv(dotenv_path=_Path(__file__).parent.parent.parent / ".env", override=True)
 
-GROQ_API_KEY    = os.getenv("GROQ_API_KEY", "")
-GROQ_BASE_URL   = "https://api.groq.com/openai/v1"
-GROQ_MODEL      = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "llama3.2")
-MODEL_RETRIES   = int(os.getenv("PERSONAL_OS_MODEL_RETRIES", "2"))
-GROQ_TIMEOUT    = int(os.getenv("PERSONAL_OS_GROQ_TIMEOUT_SECONDS", "30"))
-OLLAMA_TIMEOUT  = int(os.getenv("PERSONAL_OS_OLLAMA_TIMEOUT_SECONDS", "120"))
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
+MODEL_BACKEND = os.getenv("PERSONAL_OS_MODEL_BACKEND", "auto").lower()
+
+
+MODEL_RETRIES = int(os.getenv("PERSONAL_OS_MODEL_RETRIES", "2"))
+GROQ_TIMEOUT = int(os.getenv("PERSONAL_OS_GROQ_TIMEOUT_SECONDS", "30"))
+
 
 logger = observability.get_logger(__name__)
 
-
-# ─────────────────────────────────────────────
-#  Status checks
-# ─────────────────────────────────────────────
 
 def is_groq_available() -> bool:
     return bool(GROQ_API_KEY)
 
 
-def is_ollama_running() -> bool:
+def is_ollama_available() -> bool:
+    if MODEL_BACKEND == "groq":
+        return False
     try:
-        r = requests.get(OLLAMA_BASE_URL + "/api/tags", timeout=3)
-        return r.status_code == 200
+        response = requests.get(OLLAMA_BASE_URL.rstrip("/") + "/api/tags", timeout=2)
+        return response.ok
     except Exception:
         return False
 
 
-def is_model_available() -> bool:
-    try:
-        r      = requests.get(OLLAMA_BASE_URL + "/api/tags", timeout=3)
-        models = [m["name"] for m in r.json().get("models", [])]
-        return any(OLLAMA_MODEL in m for m in models)
-    except Exception:
-        return False
 
 
 def get_status() -> dict:
-    groq_ok   = is_groq_available()
-    ollama_ok = is_ollama_running()
-    model_ok  = is_model_available() if ollama_ok else False
+    groq_ok = is_groq_available()
+    ollama_ok = is_ollama_available()
+    backends = _available_backends()
+    active = backends[0] if backends else ""
     return {
-        "groq_available":  groq_ok,
-        "groq_model":      GROQ_MODEL,
-        "ollama_running":  ollama_ok,
-        "model_available": model_ok,
-        "ollama_model":    OLLAMA_MODEL,
-        "active_backend":  "groq" if groq_ok else "ollama",
-        "model":           GROQ_MODEL if groq_ok else OLLAMA_MODEL,
-        "ready":           groq_ok or (ollama_ok and model_ok)
+        "groq_available": groq_ok,
+        "groq_model": GROQ_MODEL,
+        "ollama_available": ollama_ok,
+        "ollama_model": OLLAMA_MODEL,
+        "configured_backend": MODEL_BACKEND,
+
+        "active_backend": active,
+        "model": GROQ_MODEL if active == "groq" else OLLAMA_MODEL if active == "ollama" else "",
+
+        "ready": bool(active),
     }
 
 
-# ─────────────────────────────────────────────
-#  Core ask — Groq first, Ollama fallback
-# ─────────────────────────────────────────────
+
 
 def ask(
-    prompt:      str,
-    system:      str   = None,
+    prompt: str,
+    system: str | None = None,
     temperature: float = 0.7,
-    max_tokens:  int   = 2048
+    max_tokens: int = 2048,
 ) -> str:
-    """
-    Send a prompt and return the full response as a string.
-    Uses Groq if available, falls back to local Ollama.
-    """
+
+    """Send a prompt and return the full response as a string."""
+
     prompt = safeguards.truncate_text(prompt, safeguards.MAX_PROMPT_CHARS, "prompt")
     start = time.perf_counter()
-    if is_groq_available():
-        backend = "groq"
-        result = _ask_groq(prompt, system, temperature, max_tokens)
-    elif is_ollama_running():
-        backend = "ollama"
-        result = _ask_ollama(prompt, system, temperature, max_tokens)
-    else:
-        raise ConnectionError(
-            "No AI backend available.\n"
-            "Option 1: Add GROQ_API_KEY to your .env file\n"
-            "Option 2: Run 'ollama serve' for local AI"
-        )
+    errors = []
+    result = ""
+    backend = ""
+    for candidate in _available_backends():
+        try:
+            backend = candidate
+            if candidate == "groq":
+                result = _ask_groq(prompt=prompt, system=system, temperature=temperature, max_tokens=max_tokens)
+            elif candidate == "ollama":
+                result = _ask_ollama(prompt=prompt, system=system, temperature=temperature, max_tokens=max_tokens)
+            break
+        except Exception as exc:
+            errors.append(candidate + ": " + str(exc))
+            observability.log_event(logger, "model.fallback", backend=candidate, reason=str(exc))
+            result = ""
+    if not result:
+        raise ConnectionError("No model backend available. " + " | ".join(errors))
+
+
     observability.log_event(
         logger,
         "model.request",
@@ -109,42 +120,39 @@ def ask(
         output_chars=len(result),
         tokens=None,
     )
+
     return safeguards.trim_output(result)
 
 
 def ask_json(
-    prompt:      str,
-    system:      str   = None,
-    temperature: float = 0.2
+    prompt: str,
+    system: str | None = None,
+    temperature: float = 0.2,
 ) -> dict:
-    """
-    Ask a question and expect a JSON object back.
-    Used by the router and schema engine.
-    """
+    """Ask a question and expect a JSON object back."""
+
     json_system = (system or "") + (
         "\n\nCRITICAL: Respond with ONLY a valid JSON object. "
         "No explanation. No markdown. No backticks. Raw JSON only."
     )
 
-    try:
-        raw = ask(prompt, system=json_system, temperature=temperature)
-    except Exception as e:
-        raise RuntimeError("Brain request failed: " + str(e))
+    raw = ask(prompt, system=json_system, temperature=temperature)
 
     # Clean up model formatting
     raw = raw.strip()
     if raw.startswith("```"):
         parts = raw.split("```")
-        raw   = parts[1] if len(parts) > 1 else raw
+        raw = parts[1] if len(parts) > 1 else raw
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.strip()
 
-    # Fix truncated JSON
-    open_braces    = raw.count("{")
-    close_braces   = raw.count("}")
-    open_brackets  = raw.count("[")
+    # Fix truncated JSON (best effort)
+    open_braces = raw.count("{")
+    close_braces = raw.count("}")
+    open_brackets = raw.count("[")
     close_brackets = raw.count("]")
+
     if open_brackets > close_brackets:
         raw += "]" * (open_brackets - close_brackets)
     if open_braces > close_braces:
@@ -161,71 +169,113 @@ def ask_json(
 
 
 def ask_stream(
-    prompt:      str,
-    system:      str   = None,
-    temperature: float = 0.7
+    prompt: str,
+    system: str | None = None,
+    temperature: float = 0.7,
 ):
-    """
-    Stream response token by token.
-    Use in Streamlit UI for live typing effect.
-    """
-    if is_groq_available():
-        yield from _stream_groq(prompt, system, temperature)
-    elif is_ollama_running():
-        yield from _stream_ollama(prompt, system, temperature)
-    else:
-        raise ConnectionError("No AI backend available.")
+    """Stream response token by token."""
+
+    prompt = safeguards.truncate_text(prompt, safeguards.MAX_PROMPT_CHARS, "prompt")
+    errors = []
+    for candidate in _available_backends():
+        try:
+            if candidate == "groq":
+                yield from _stream_groq(prompt=prompt, system=system, temperature=temperature)
+            elif candidate == "ollama":
+                yield from _stream_ollama(prompt=prompt, system=system, temperature=temperature)
+            return
+        except Exception as exc:
+            errors.append(candidate + ": " + str(exc))
+            observability.log_event(logger, "model.stream_fallback", backend=candidate, reason=str(exc))
+    raise ConnectionError("No streaming model backend available. " + " | ".join(errors))
+
+
 
 
 def ask_with_history(
-    messages:    list,
-    system:      str   = None,
-    temperature: float = 0.7
+    messages: list,
+    system: str | None = None,
+    temperature: float = 0.7,
 ) -> str:
-    """
-    Send conversation history and get a response.
-    Used for multi-turn chat with memory.
-    """
+    """Send conversation history and get a response."""
+
     messages = [
-        {**message, "content": safeguards.truncate_text(str(message.get("content", "")), safeguards.MAX_PROMPT_CHARS, "message")}
+        {
+            **message,
+            "content": safeguards.truncate_text(
+                str(message.get("content", "")), safeguards.MAX_PROMPT_CHARS, "message"
+            ),
+        }
         for message in messages
     ]
+
+    errors = []
+    for candidate in _available_backends():
+        try:
+            if candidate == "groq":
+                return _chat_groq(messages=messages, system=system, temperature=temperature)
+            if candidate == "ollama":
+                return _chat_ollama(messages=messages, system=system, temperature=temperature)
+        except Exception as exc:
+            errors.append(candidate + ": " + str(exc))
+            observability.log_event(logger, "model.history_fallback", backend=candidate, reason=str(exc))
+    raise ConnectionError("No model backend available. " + " | ".join(errors))
+
+
+# ------------------------------
+# Backend selection
+# ------------------------------
+
+def _available_backends() -> list[str]:
+    if MODEL_BACKEND == "groq":
+        return ["groq"] if is_groq_available() else []
+    if MODEL_BACKEND == "ollama":
+        return ["ollama"] if is_ollama_available() else []
+    backends = []
     if is_groq_available():
-        return _chat_groq(messages, system, temperature)
-    elif is_ollama_running():
-        return _chat_ollama(messages, system, temperature)
-    else:
-        raise ConnectionError("No AI backend available.")
+        backends.append("groq")
+    if is_ollama_available():
+        backends.append("ollama")
+    return backends
 
 
-# ─────────────────────────────────────────────
-#  Groq implementation
-# ─────────────────────────────────────────────
+# ------------------------------
+# Groq implementation
+# ------------------------------
 
-def _ask_groq(prompt, system, temperature, max_tokens) -> str:
+def _build_messages(prompt: str, system: str | None):
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+    return messages
 
-    headers = {
+
+def _headers() -> dict:
+    return {
         "Authorization": "Bearer " + GROQ_API_KEY,
-        "Content-Type":  "application/json"
+        "Content-Type": "application/json",
     }
+
+
+
+def _ask_groq(prompt: str, system: str | None, temperature: float, max_tokens: int) -> str:
+    messages = _build_messages(prompt, system)
+
     payload = {
-        "model":       GROQ_MODEL,
-        "messages":    messages,
+        "model": GROQ_MODEL,
+        "messages": messages,
         "temperature": temperature,
-        "max_tokens":  max_tokens,
-        "stream":      False
+        "max_tokens": max_tokens,
+        "stream": False,
     }
 
     def request():
         r = requests.post(
             GROQ_BASE_URL + "/chat/completions",
-            headers=headers,
+            headers=_headers(),
             json=payload,
-            timeout=GROQ_TIMEOUT
+            timeout=GROQ_TIMEOUT,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
@@ -240,30 +290,26 @@ def _ask_groq(prompt, system, temperature, max_tokens) -> str:
         raise RuntimeError("Groq request failed: " + str(e))
 
 
-def _chat_groq(messages, system, temperature) -> str:
+def _chat_groq(messages: list, system: str | None, temperature: float) -> str:
     full_messages = []
     if system:
         full_messages.append({"role": "system", "content": system})
     full_messages.extend(messages)
 
-    headers = {
-        "Authorization": "Bearer " + GROQ_API_KEY,
-        "Content-Type":  "application/json"
-    }
     payload = {
-        "model":       GROQ_MODEL,
-        "messages":    full_messages,
+        "model": GROQ_MODEL,
+        "messages": full_messages,
         "temperature": temperature,
-        "max_tokens":  2048,
-        "stream":      False
+        "max_tokens": 2048,
+        "stream": False,
     }
 
     def request():
         r = requests.post(
             GROQ_BASE_URL + "/chat/completions",
-            headers=headers,
+            headers=_headers(),
             json=payload,
-            timeout=GROQ_TIMEOUT
+            timeout=GROQ_TIMEOUT,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
@@ -274,132 +320,116 @@ def _chat_groq(messages, system, temperature) -> str:
         raise RuntimeError("Groq chat failed: " + str(e))
 
 
-def _stream_groq(prompt, system, temperature):
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+def _stream_groq(prompt: str, system: str | None, temperature: float):
 
-    headers = {
-        "Authorization": "Bearer " + GROQ_API_KEY,
-        "Content-Type":  "application/json"
-    }
+    messages = _build_messages(prompt, system)
+
     payload = {
-        "model":       GROQ_MODEL,
-        "messages":    messages,
+        "model": GROQ_MODEL,
+        "messages": messages,
         "temperature": temperature,
-        "max_tokens":  2048,
-        "stream":      True
+        "max_tokens": 2048,
+        "stream": True,
     }
 
     with requests.post(
         GROQ_BASE_URL + "/chat/completions",
-        headers=headers,
+        headers=_headers(),
         json=payload,
         stream=True,
-        timeout=GROQ_TIMEOUT
+        timeout=GROQ_TIMEOUT,
     ) as r:
         r.raise_for_status()
         for line in r.iter_lines():
-            if line:
-                line = line.decode("utf-8")
-                if line.startswith("data: "):
-                    line = line[6:]
-                if line == "[DONE]":
-                    break
-                try:
-                    chunk   = json.loads(line)
-                    content = chunk["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
-                except Exception:
-                    continue
+            if not line:
+                continue
+            decoded = line.decode("utf-8")
+            if decoded.startswith("data: "):
+                decoded = decoded[6:]
+            if decoded == "[DONE]":
+                break
+            try:
+                chunk = json.loads(decoded)
+                content = chunk["choices"][0]["delta"].get("content", "")
+                if content:
+                    yield content
+            except Exception:
+                continue
 
 
-# ─────────────────────────────────────────────
-#  Ollama fallback
-# ─────────────────────────────────────────────
+# ------------------------------
+# Ollama implementation
+# ------------------------------
 
-def _ask_ollama(prompt, system, temperature, max_tokens) -> str:
-    payload = {
-        "model":   OLLAMA_MODEL,
-        "prompt":  prompt,
-        "stream":  False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": max_tokens
-        }
-    }
+def _ollama_url(path: str) -> str:
+    return OLLAMA_BASE_URL.rstrip("/") + path
+
+
+def _ollama_messages(prompt: str, system: str | None) -> list[dict]:
+    messages = []
     if system:
-        payload["system"] = system
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def _ask_ollama(prompt: str, system: str | None, temperature: float, max_tokens: int) -> str:
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": _ollama_messages(prompt, system),
+        "stream": False,
+        "options": {"temperature": temperature, "num_predict": max_tokens},
+    }
 
     def request():
-        r = requests.post(
-            OLLAMA_BASE_URL + "/api/generate",
-            json=payload,
-            timeout=OLLAMA_TIMEOUT
-        )
-        r.raise_for_status()
-        return r.json().get("response", "").strip()
+        response = requests.post(_ollama_url("/api/chat"), json=payload, timeout=GROQ_TIMEOUT)
+        response.raise_for_status()
+        return response.json().get("message", {}).get("content", "").strip()
 
-    try:
-        return _with_retries(request, "ollama")
-    except requests.exceptions.Timeout:
-        raise RuntimeError("Ollama timed out. Try a shorter prompt.")
-    except Exception as e:
-        raise RuntimeError("Ollama error: " + str(e))
+    return _with_retries(request, "ollama")
 
 
-def _chat_ollama(messages, system, temperature) -> str:
-    payload = {
-        "model":    OLLAMA_MODEL,
-        "messages": messages,
-        "stream":   False,
-        "options":  {"temperature": temperature}
-    }
+def _chat_ollama(messages: list, system: str | None, temperature: float) -> str:
+    full_messages = []
     if system:
-        payload["system"] = system
+        full_messages.append({"role": "system", "content": system})
+    full_messages.extend(messages)
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": full_messages,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
 
     def request():
-        r = requests.post(
-            OLLAMA_BASE_URL + "/api/chat",
-            json=payload,
-            timeout=OLLAMA_TIMEOUT
-        )
-        r.raise_for_status()
-        return r.json()["message"]["content"].strip()
+        response = requests.post(_ollama_url("/api/chat"), json=payload, timeout=GROQ_TIMEOUT)
+        response.raise_for_status()
+        return response.json().get("message", {}).get("content", "").strip()
 
-    try:
-        return _with_retries(request, "ollama_chat")
-    except Exception as e:
-        raise RuntimeError("Ollama chat error: " + str(e))
+    return _with_retries(request, "ollama_chat")
 
 
-def _stream_ollama(prompt, system, temperature):
+def _stream_ollama(prompt: str, system: str | None, temperature: float):
     payload = {
-        "model":   OLLAMA_MODEL,
-        "prompt":  prompt,
-        "stream":  True,
-        "options": {"temperature": temperature}
+        "model": OLLAMA_MODEL,
+        "messages": _ollama_messages(prompt, system),
+        "stream": True,
+        "options": {"temperature": temperature},
     }
-    if system:
-        payload["system"] = system
-
-    with requests.post(
-        OLLAMA_BASE_URL + "/api/generate",
-        json=payload,
-        stream=True,
-        timeout=OLLAMA_TIMEOUT
-    ) as r:
-        r.raise_for_status()
-        for line in r.iter_lines():
-            if line:
-                chunk = json.loads(line)
-                token = chunk.get("response", "")
-                if token:
-                    yield token
+    with requests.post(_ollama_url("/api/chat"), json=payload, stream=True, timeout=GROQ_TIMEOUT) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line.decode("utf-8"))
+                content = chunk.get("message", {}).get("content", "")
+                if content:
+                    yield content
                 if chunk.get("done"):
                     break
+            except Exception:
+                continue
 
 
 def _with_retries(fn, backend: str):
@@ -411,7 +441,7 @@ def _with_retries(fn, backend: str):
             last_error = exc
             if attempt >= MODEL_RETRIES:
                 break
-            delay = 0.25 * (2 ** attempt)
+            delay = 0.25 * (2**attempt)
             observability.log_event(
                 logger,
                 "model.retry",
@@ -424,17 +454,13 @@ def _with_retries(fn, backend: str):
     raise last_error
 
 
-# ─────────────────────────────────────────────
-#  Test
-# ─────────────────────────────────────────────
-
 if __name__ == "__main__":
     print("Checking brain status...\n")
     status = get_status()
     print("  Active backend : " + status["active_backend"])
     print("  Model          : " + status["model"])
     print("  Groq available : " + str(status["groq_available"]))
-    print("  Ollama running : " + str(status["ollama_running"]))
+
     print("  Ready          : " + str(status["ready"]))
 
     if status["ready"]:
@@ -443,27 +469,12 @@ if __name__ == "__main__":
         r = ask("What is the capital of Japan? One sentence.")
         print("  " + r)
 
-        print("\nTest 2: Math")
-        print("-" * 40)
-        r2 = ask("What is the derivative of e^(x^2)? Show steps briefly.")
-        print("  " + r2)
-
-        print("\nTest 3: JSON output")
+        print("\nTest 2: JSON output")
         print("-" * 40)
         r3 = ask_json(
-            "Return a JSON object with fields: name, capital, population "
-            "for Japan."
+            "Return a JSON object with fields: name, capital, population for Japan."
         )
         print("  " + str(r3))
-
-        print("\nTest 4: Conversation memory")
-        print("-" * 40)
-        r4 = ask_with_history([
-            {"role": "user",      "content": "My name is Alex."},
-            {"role": "assistant", "content": "Nice to meet you Alex!"},
-            {"role": "user",      "content": "What is my name?"}
-        ])
-        print("  " + r4)
     else:
         print("\nBrain not ready.")
-        print("Add GROQ_API_KEY to your .env file.")
+        print("Add GROK_API_KEY to your .env file.")

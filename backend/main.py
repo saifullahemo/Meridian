@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 
 from backend.core import memory, observability, rag
+from backend.core import projects
 
 logger = observability.get_logger(__name__)
 
@@ -26,7 +27,8 @@ app.add_middleware(
 async def request_context_middleware(request, call_next):
     request_id = request.headers.get("x-request-id") or observability.new_request_id()
     session_id = request.headers.get("x-session-id", "")
-    observability.set_context(request_id=request_id, session_id=session_id)
+    project_id = request.headers.get("x-project-id", "")
+    observability.set_context(request_id=request_id, session_id=session_id, project_id=project_id)
     with observability.trace_span("http.request", logger, method=request.method, path=request.url.path):
         response = await call_next(request)
     response.headers["x-request-id"] = request_id
@@ -48,6 +50,7 @@ def enforce_retention_on_startup():
     days = int(os.getenv("PERSONAL_OS_RETENTION_DAYS", "90"))
     memory.cleanup_older_than(days)
     rag.cleanup_older_than(days)
+    projects.init_project_tables()
     observability.cleanup_older_than(days)
 
 
@@ -67,6 +70,14 @@ try:
     from backend.api.routes.app_data import router as app_data_router
 
     app.include_router(app_data_router)
+except Exception:
+    # Keep server running even if optional route deps are missing
+    pass
+
+try:
+    from backend.api.routes.projects import router as projects_router
+
+    app.include_router(projects_router)
 except Exception:
     # Keep server running even if optional route deps are missing
     pass

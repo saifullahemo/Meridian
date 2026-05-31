@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ConversationMode from './ConversationMode';
+import ProjectWorkspace from './ProjectWorkspace';
 
 export type ChatMessage = {
   role: 'user' | 'assistant' | 'system';
@@ -7,6 +8,7 @@ export type ChatMessage = {
   success?: boolean;
   action?: string;
   artifacts?: any[];
+  sources?: any[];
   suggestions?: string[];
   route?: {
     action?: string;
@@ -33,6 +35,14 @@ type ModuleSchema = {
 
 type ModulesMap = Record<string, ModuleSchema>;
 type RecordRow = Record<string, string | number | boolean | null>;
+type ProjectSummary = {
+  id: number;
+  name: string;
+  description?: string;
+  instructions?: string;
+  file_count?: number;
+  artifact_count?: number;
+};
 type ModuleDraft = {
   key: string;
   label: string;
@@ -78,7 +88,9 @@ export default function App() {
   });
   const [modules, setModules] = useState<ModulesMap>({});
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [activeModule, setActiveModule] = useState('');
+  const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
   const [statusText, setStatusText] = useState('Checking');
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -94,7 +106,16 @@ export default function App() {
     );
     setModules(json.modules || {});
     setCounts(json.counts || {});
-    setActiveModule((current) => current || Object.keys(json.modules || {})[0] || '');
+    // Important: do not auto-select the first module when entering Projects/data mode.
+    // Only keep the current selection if it exists.
+    setActiveModule((current) => (current ? current : ''));
+  }, [api]);
+
+  const refreshProjects = useCallback(async () => {
+    const json = await readJson<{ projects: ProjectSummary[] }>(
+      await fetch(api('/api/projects')),
+    );
+    setProjects(Array.isArray(json.projects) ? json.projects : []);
   }, [api]);
 
   useEffect(() => {
@@ -103,6 +124,7 @@ export default function App() {
 
   useEffect(() => {
     refreshModules().catch((e) => setNotice(e.message));
+    refreshProjects().catch((e) => setNotice(e.message));
     fetch(api('/api/status'))
       .then((res) => readJson<{ ai?: { ready?: boolean; model?: string; error?: string } }>(res))
       .then((json) => {
@@ -110,9 +132,10 @@ export default function App() {
         else setStatusText(json.ai?.error || 'AI offline');
       })
       .catch((e) => setStatusText(e.message));
-  }, [api, refreshModules]);
+  }, [api, refreshModules, refreshProjects]);
 
-  const pageTitle = mode === 'data' && activeModule ? modules[activeModule]?.label || modeLabels[mode] : modeLabels[mode];
+  const activeProject = projects.find((project) => project.id === activeProjectId);
+  const pageTitle = mode === 'data' && activeProject ? activeProject.name : modeLabels[mode];
 
   return (
     <div className="appShell">
@@ -152,25 +175,25 @@ export default function App() {
 
         <div className="moduleRail">
           <div className="railLabel">Projects</div>
-          {Object.entries(modules).map(([key, mod]) => (
+          {projects.map((project) => (
             <button
-              key={key}
-              className={activeModule === key && mode === 'data' ? 'moduleButton active' : 'moduleButton'}
+              key={project.id}
+              className={activeProjectId === project.id && mode === 'data' ? 'moduleButton active' : 'moduleButton'}
               type="button"
               onClick={() => {
-                setActiveModule(key);
+                setActiveProjectId(project.id);
                 setMode('data');
               }}
             >
-              <span>{mod.icon || '□'} {mod.label || key}</span>
-              <strong>{counts[key] || 0}</strong>
+              <span>{project.name}</span>
+              <strong>{project.file_count || 0}</strong>
             </button>
           ))}
           <button
-            className={mode === 'data' && !activeModule ? 'moduleButton active' : 'moduleButton'}
+            className={mode === 'data' && !activeProjectId ? 'moduleButton active' : 'moduleButton'}
             type="button"
             onClick={() => {
-              setActiveModule('');
+              setActiveProjectId(null);
               setMode('data');
             }}
           >
@@ -206,12 +229,12 @@ export default function App() {
         {mode === 'jobs' ? <JobsView api={api} sessionId={sessionId} /> : null}
         {mode === 'chat' ? <ConversationMode apiBaseUrl={apiBase} sessionId={sessionId} setSessionId={setSessionId} /> : null}
         {mode === 'data' ? (
-          <DataView
+          <ProjectWorkspace
             api={api}
-            modules={modules}
-            moduleKey={activeModule}
-            setActiveModule={setActiveModule}
-            onChanged={refreshModules}
+            projects={projects}
+            activeProjectId={activeProjectId}
+            setActiveProjectId={setActiveProjectId}
+            onChanged={refreshProjects}
           />
         ) : null}
         {mode === 'rag' ? <RagView api={api} /> : null}
@@ -219,57 +242,6 @@ export default function App() {
         {mode === 'observability' ? <ObservabilityView api={api} sessionId={sessionId} /> : null}
       </main>
     </div>
-  );
-}
-
-function ChatView({ api, sessionId }: { api: (path: string) => string; sessionId: string }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [instruction, setInstruction] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  async function submit() {
-    const text = instruction.trim();
-    if (!text || loading) return;
-    setMessages((prev) => [...prev, { role: 'user', content: text }]);
-    setInstruction('');
-    setLoading(true);
-    try {
-      const json = await readJson<any>(
-        await fetch(api('/api/chat'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ instruction: text, session_id: sessionId }),
-        }),
-      );
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: String(json.message || ''),
-          success: Boolean(json.success),
-          action: json.action,
-          route: json.meta?.route,
-        },
-      ]);
-    } catch (e: any) {
-      setMessages((prev) => [...prev, { role: 'assistant', content: String(e.message || e), success: false }]);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <section className="panel chatPanel">
-      <MessageList messages={messages} loading={loading} empty="Ask Personal OS to add, show, update, summarize, or search your data." />
-      <Composer
-        value={instruction}
-        placeholder="Type an instruction..."
-        loading={loading}
-        onChange={setInstruction}
-        onSubmit={submit}
-        onClear={() => setMessages([])}
-      />
-    </section>
   );
 }
 
@@ -1140,7 +1112,10 @@ function RagView({ api }: { api: (path: string) => string }) {
 
 function ObservabilityView({ api, sessionId }: { api: (path: string) => string; sessionId: string }) {
   const [events, setEvents] = useState<any[]>([]);
+  const [summary, setSummary] = useState<any | null>(null);
   const [filterSession, setFilterSession] = useState(false);
+  const [eventFilter, setEventFilter] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const loadEvents = useCallback(async () => {
@@ -1148,12 +1123,16 @@ function ObservabilityView({ api, sessionId }: { api: (path: string) => string; 
     try {
       const params = new URLSearchParams({ limit: '100' });
       if (filterSession) params.set('session_id', sessionId);
+      if (eventFilter.trim()) params.set('event', eventFilter.trim());
+      if (projectFilter.trim()) params.set('project_id', projectFilter.trim());
       const json = await readJson<{ events: any[] }>(await fetch(api(`/api/observability/events?${params}`)));
       setEvents(json.events || []);
+      const summaryJson = await readJson<{ summary: any }>(await fetch(api('/api/observability/summary?limit=500')));
+      setSummary(summaryJson.summary || null);
     } catch (e: any) {
       setError(String(e.message || e));
     }
-  }, [api, filterSession, sessionId]);
+  }, [api, eventFilter, filterSession, projectFilter, sessionId]);
 
   useEffect(() => {
     loadEvents();
@@ -1166,9 +1145,40 @@ function ObservabilityView({ api, sessionId }: { api: (path: string) => string; 
           <input type="checkbox" checked={filterSession} onChange={(e) => setFilterSession(e.currentTarget.checked)} />
           <span>Current session</span>
         </label>
+        <input value={eventFilter} onChange={(e) => setEventFilter(e.currentTarget.value)} placeholder="Filter event" />
+        <input value={projectFilter} onChange={(e) => setProjectFilter(e.currentTarget.value)} placeholder="Project id" />
         <button className="btn primary" type="button" onClick={loadEvents}>Refresh</button>
       </div>
       {error ? <div className="notice error">{error}</div> : null}
+      {summary ? (
+        <div className="metricGrid">
+          <Metric label="Trace events" value={summary.total ?? 0} />
+          <Metric label="Errors" value={summary.errors ?? 0} />
+          <Metric label="Avg latency" value={summary.avg_latency_ms ? `${summary.avg_latency_ms} ms` : '-'} />
+        </div>
+      ) : null}
+      {summary ? (
+        <div className="observabilitySummary">
+          <div className="panel">
+            <div className="panelHeader"><h2>Top Events</h2></div>
+            {Object.entries(summary.by_event || {}).map(([name, count]) => (
+              <button className="eventChip" type="button" key={name} onClick={() => setEventFilter(name)}>
+                <span>{name}</span>
+                <strong>{String(count)}</strong>
+              </button>
+            ))}
+          </div>
+          <div className="panel">
+            <div className="panelHeader"><h2>Loggers</h2></div>
+            {Object.entries(summary.by_logger || {}).map(([name, count]) => (
+              <div className="eventChip" key={name}>
+                <span>{name}</span>
+                <strong>{String(count)}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
       <div className="panel tablePanel">
         {!events.length ? <div className="emptyState">No trace events found.</div> : null}
         {events.length ? (
@@ -1178,9 +1188,10 @@ function ObservabilityView({ api, sessionId }: { api: (path: string) => string; 
                 <th>Time</th>
                 <th>Event</th>
                 <th>Logger</th>
-                <th>Request</th>
-                <th>Session</th>
-                <th>Data</th>
+	                <th>Request</th>
+	                <th>Session</th>
+	                <th>Project</th>
+	                <th>Data</th>
               </tr>
             </thead>
             <tbody>
@@ -1189,9 +1200,10 @@ function ObservabilityView({ api, sessionId }: { api: (path: string) => string; 
                   <td>{event.created_at}</td>
                   <td>{event.event}</td>
                   <td>{event.logger}</td>
-                  <td>{event.request_id}</td>
-                  <td>{event.session_id}</td>
-                  <td>{JSON.stringify(event.data)}</td>
+	                  <td>{event.request_id}</td>
+	                  <td>{event.session_id}</td>
+	                  <td>{event.project_id}</td>
+	                  <td><pre className="traceData">{JSON.stringify(event.data, null, 2)}</pre></td>
                 </tr>
               ))}
             </tbody>
@@ -1199,64 +1211,6 @@ function ObservabilityView({ api, sessionId }: { api: (path: string) => string; 
         ) : null}
       </div>
     </section>
-  );
-}
-
-function MessageList({ messages, loading, empty }: { messages: ChatMessage[]; loading: boolean; empty: string }) {
-  return (
-    <div className="chat">
-      {!messages.length ? <div className="emptyState">{empty}</div> : null}
-      {messages.map((message, index) => (
-        <div key={index} className={message.role === 'user' ? 'bubble user' : 'bubble assistant'}>
-          {message.route ? (
-            <div className="routePill">
-              {message.route.action || message.action || 'chat'}
-              {message.route.module ? ` · ${message.route.module}` : ''}
-            </div>
-          ) : null}
-          <div className="bubbleText">{message.content}</div>
-        </div>
-      ))}
-      {loading ? (
-        <div className="bubble assistant">
-          <div className="bubbleText">Thinking...</div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function Composer({
-  value,
-  placeholder,
-  loading,
-  onChange,
-  onSubmit,
-  onClear,
-}: {
-  value: string;
-  placeholder: string;
-  loading: boolean;
-  onChange: (value: string) => void;
-  onSubmit: () => void;
-  onClear: () => void;
-}) {
-  return (
-    <div className="composer">
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.currentTarget.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) onSubmit();
-        }}
-        placeholder={placeholder}
-        rows={3}
-      />
-      <div className="actions">
-        <button className="btn secondary" type="button" onClick={onClear} disabled={loading}>Clear</button>
-        <button className="btn primary" type="button" onClick={onSubmit} disabled={loading || !value.trim()}>Send</button>
-      </div>
-    </div>
   );
 }
 

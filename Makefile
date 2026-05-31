@@ -45,7 +45,7 @@ typecheck:
 	cd frontend-react && npm run build
 
 eval:
-	$(PYTHON) -m backend.eval_harness --cases tests/golden_prompts.json
+	PERSONAL_OS_LLM_ROUTER=false $(PYTHON) -m backend.eval_harness --cases tests/golden_prompts.json
 
 finetune-lora:
 	$(PYTHON) scripts/prototype_finetune_lora.py --data data/training/labels.jsonl --output data/training/lora-adapter

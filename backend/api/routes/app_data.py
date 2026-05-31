@@ -133,6 +133,8 @@ def observability_events(
     limit: int = Query(default=100, ge=1, le=1000),
     request_id: str = "",
     session_id: str = "",
+    project_id: str = "",
+    event: str = "",
     _authorized: bool = Depends(require_api_key),
 ):
     return {
@@ -141,8 +143,18 @@ def observability_events(
             limit=limit,
             request_id=request_id or None,
             session_id=session_id or None,
+            project_id=project_id or None,
+            event=event or None,
         ),
     }
+
+
+@router.get("/observability/summary")
+def observability_summary(
+    limit: int = Query(default=500, ge=1, le=2000),
+    _authorized: bool = Depends(require_api_key),
+):
+    return {"success": True, "summary": observability.get_trace_summary(limit=limit)}
 
 
 @router.post("/maintenance/retention")

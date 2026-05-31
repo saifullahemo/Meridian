@@ -415,6 +415,12 @@ input:focus, select:focus, textarea:focus {
   background: var(--surface-2);
 }
 
+.btn.danger {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: #f2bec3;
+}
+
 .btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -429,6 +435,137 @@ input:focus, select:focus, textarea:focus {
 .dataLayout, .dashboard {
   display: grid;
   gap: 14px;
+}
+
+.projectWorkspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 14px;
+  align-items: start;
+  min-height: calc(100vh - 118px);
+}
+
+.projectCreate {
+  max-width: 780px;
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.projectMain {
+  min-height: calc(100vh - 118px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.projectMain > .panelHeader {
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  align-items: flex-start;
+}
+
+.projectMain > .panelHeader p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.projectSettings {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.projectChat {
+  max-height: none;
+}
+
+.projectSide {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.projectSide .panel {
+  padding: 14px;
+}
+
+.projectPicker {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.projectPicker > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.filePreview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sideTabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.sideTabs button {
+  min-height: 34px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.sideTabs button.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: #b9ddd4;
+  font-weight: 700;
+}
+
+.sideForm {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.sourceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sourceChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.sourceChips span {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid #b9ddd4;
+  font-size: 12px;
 }
 
 .metricGrid {
@@ -881,6 +1018,48 @@ td {
   font-size: 12px;
 }
 
+.observabilitySummary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 14px 0;
+}
+
+.observabilitySummary .panel {
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.eventChip {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 0;
+  color: var(--text);
+  background: transparent;
+  border-top: 1px solid var(--line);
+  text-align: left;
+}
+
+.eventChip span {
+  overflow-wrap: anywhere;
+}
+
+.eventChip strong {
+  color: var(--muted);
+}
+
+.traceData {
+  margin: 0;
+  max-width: 440px;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+
 @media (max-width: 980px) {
   .appShell {
     grid-template-columns: 1fr;
@@ -926,7 +1105,9 @@ td {
   .resumeGrid,
   .ragGrid,
   .chatWorkspace,
-  .notificationGrid,
+	  .projectWorkspace,
+  .observabilitySummary,
+	  .notificationGrid,
   .splitControls {
     grid-template-columns: 1fr;
   }

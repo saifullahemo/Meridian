@@ -10,10 +10,12 @@ export default function ConversationMode({
   apiBaseUrl,
   sessionId,
   setSessionId,
+  onProjectsChanged,
 }: {
   apiBaseUrl: string;
   sessionId: string;
   setSessionId: (sessionId: string) => void;
+  onProjectsChanged?: () => Promise<void> | void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
@@ -139,6 +141,9 @@ export default function ConversationMode({
           suggestions: json.meta?.suggestions || [],
         };
         setMessages((prev) => [...prev, assistant]);
+        if (json.action === 'create_project' || json.meta?.refresh?.includes('projects')) {
+          onProjectsChanged?.();
+        }
         loadSessions().catch(() => undefined);
       } else {
         res = await fetch(apiRoot + '/api/chat/stream', {
@@ -200,6 +205,9 @@ export default function ConversationMode({
         index === assistantIndex ? { ...msg, content: truncate(msg.content + String(data.text || ''), 12000), action: 'chat' } : msg
       )));
     } else if (event === 'final') {
+      if (data.action === 'create_project' || data.meta?.refresh?.includes('projects')) {
+        onProjectsChanged?.();
+      }
       setMessages((prev) => prev.map((msg, index) => (
         index === assistantIndex
           ? {

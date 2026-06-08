@@ -323,6 +323,18 @@ def test_create_module_handler(monkeypatch):
     assert result["data"] == created
 
 
+def test_create_project_handler(monkeypatch):
+    created = {"id": 7, "name": "Rayhan", "description": "", "instructions": ""}
+    monkeypatch.setattr(universal_agent.projects, "create_project", lambda name, description="", instructions="": created)
+
+    result = universal_agent.execute(route("create_project", None, raw_instruction="create a project named Rayhan"))
+
+    assert result["success"] is True
+    assert result["action"] == "create_project"
+    assert result["data"] == created
+    assert result["meta"]["project_id"] == 7
+
+
 def test_check_email_handler():
     result = universal_agent.execute(route("check_email", None))
 

@@ -81,7 +81,7 @@ def capabilities() -> dict[str, Any]:
         "binaries": binaries,
         "supported_extensions": [
             ".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".md",
-            ".json", ".html", ".htm", ".png", ".jpg", ".jpeg", ".webp",
+            ".json", ".ipynb", ".html", ".htm", ".png", ".jpg", ".jpeg", ".webp",
         ],
         "ocr_ready": packages["pytesseract"] and packages["pillow"] and binaries["tesseract"],
         "layout_pdf_ready": packages["pdfplumber"] or packages["pymupdf"],
@@ -132,6 +132,8 @@ def extract_bytes(filename: str, raw: bytes, content_type: str | None = None) ->
             parts = [DocumentPart(_html_to_text(_decode_text(raw)), kind="html")]
         elif ext == ".json" or mime_type == "application/json":
             parts = [DocumentPart(_json_to_text(raw, warnings), kind="json")]
+        elif ext == ".ipynb":
+            parts = _extract_ipynb(raw, warnings)
         elif ext == ".csv" or mime_type == "text/csv":
             parts = [DocumentPart(_csv_to_text(raw, warnings), kind="table")]
         else:
@@ -252,6 +254,41 @@ def _extract_xlsx(raw: bytes, warnings: list[str]) -> tuple[list[DocumentPart], 
         if table_text:
             parts.append(DocumentPart(table_text, kind="sheet", sheet=sheet.title))
     return parts, warnings
+
+
+def _extract_ipynb(raw: bytes, warnings: list[str]) -> list[DocumentPart]:
+    try:
+        notebook = json.loads(_decode_text(raw))
+    except Exception as exc:
+        warnings.append(f"Notebook JSON parsing failed: {exc}")
+        return []
+
+    parts: list[DocumentPart] = []
+    cells = notebook.get("cells", [])
+    if not isinstance(cells, list):
+        warnings.append("Notebook did not contain a valid cells list.")
+        return []
+
+    for index, cell in enumerate(cells, start=1):
+        if not isinstance(cell, dict):
+            continue
+        cell_type = str(cell.get("cell_type") or "cell")
+        source = cell.get("source", "")
+        if isinstance(source, list):
+            source_text = "".join(str(line) for line in source)
+        else:
+            source_text = str(source or "")
+        source_text = source_text.strip()
+        if not source_text:
+            continue
+        header = f"Cell {index} [{cell_type}]"
+        if cell_type == "code":
+            text = header + "\n```python\n" + source_text + "\n```"
+        else:
+            text = header + "\n" + source_text
+        parts.append(DocumentPart(text, kind="notebook_cell", metadata={"cell": index, "cell_type": cell_type}))
+
+    return parts
 
 
 def _extract_pptx(raw: bytes, warnings: list[str]) -> tuple[list[DocumentPart], list[str]]:

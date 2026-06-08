@@ -525,6 +525,69 @@
       "excel_file": "research_project.xlsx",
       "auto_scan": false,
       "schedule": null
+    },
+    "project_details": {
+      "label": "Project Details",
+      "icon": "\ud83d\udcc1",
+      "description": "Project information",
+      "fields": [
+        {
+          "name": "project_name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_description",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "start_date",
+          "type": "date",
+          "required": true
+        },
+        {
+          "name": "end_date",
+          "type": "date",
+          "required": false
+        },
+        {
+          "name": "project_status",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "in_progress",
+            "completed",
+            "on_hold"
+          ]
+        },
+        {
+          "name": "project_notes",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "project_manager",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "project_priority",
+          "type": "enum",
+          "required": true,
+          "options": [
+            "high",
+            "medium",
+            "low"
+          ]
+        }
+      ],
+      "sources": [
+        "manual"
+      ],
+      "excel_file": "project_details.xlsx",
+      "auto_scan": false,
+      "schedule": null
     }
   },
   "scheduler": {

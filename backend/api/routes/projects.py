@@ -112,6 +112,10 @@ async def project_chat_form(
         return projects.chat(project_id, instruction, files)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except ConnectionError as e:
+        raise _model_backend_error(e) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="Project chat failed: " + str(e)) from e
 
 
 @router.post("/{project_id}/chat-json")
@@ -120,6 +124,25 @@ def project_chat_json(project_id: int, req: ProjectChatRequest, _authorized: boo
         return projects.chat(project_id, req.instruction, [])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except ConnectionError as e:
+        raise _model_backend_error(e) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="Project chat failed: " + str(e)) from e
+
+
+def _model_backend_error(error: ConnectionError) -> HTTPException:
+    message = str(error)
+    if "429" in message or "Too Many Requests" in message:
+        detail = (
+            "Groq is rate-limiting this request and no local Ollama fallback is available. "
+            "Wait for the Groq limit to reset, reduce the request size, start Ollama locally, "
+            "or configure OPENROUTER_API_KEY / GEMINI_API_KEY with PERSONAL_OS_MODEL_BACKEND=auto."
+        )
+        return HTTPException(status_code=429, detail=detail)
+    return HTTPException(
+        status_code=503,
+        detail="No model backend is available. Start Ollama locally or configure GROQ_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY.",
+    )
 
 
 @router.get("/{project_id}/files")

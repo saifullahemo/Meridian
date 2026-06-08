@@ -22,7 +22,7 @@ def _load_modules() -> dict:
 AVAILABLE_ACTIONS = [
     "search_web", "scrape", "save_data", "read_data",
     "update_data", "delete_data", "analyze", "summarize",
-    "export", "schedule", "create_module", "check_email", "multi_step"
+    "export", "schedule", "create_module", "create_project", "check_email", "multi_step"
 ]
 
 
@@ -36,6 +36,14 @@ def route(instruction: str) -> dict:
     Tries AI first, falls back to keyword detection.
     """
     modules      = _load_modules()
+    if _looks_like_project_workspace_creation(instruction):
+        return {
+            "action":      "create_project",
+            "module":      None,
+            "parameters":  {"raw_instruction": instruction},
+            "explanation": "Routed via project workspace intent",
+            "steps":       [],
+        }
     try:
         from backend.core import tools
 
@@ -151,6 +159,10 @@ def detect_action_type(instruction: str) -> str:
     if any(kw in t for kw in ["every", "schedule", "automatically", "weekly", "daily", "remind"]):
         return "schedule"
 
+    # Project workspace creation
+    if _looks_like_project_workspace_creation(instruction):
+        return "create_project"
+
     # New module creation
     if any(kw in t for kw in ["want to track", "start tracking", "track my", "new module", "new category"]):
         return "create_module"
@@ -218,6 +230,29 @@ def detect_action_type(instruction: str) -> str:
 
     # Default — let AI answer conversationally
     return "read_data"
+
+
+def _looks_like_project_workspace_creation(instruction: str) -> bool:
+    """Distinguish a Project workspace from a dynamic data module/schema."""
+    t = " ".join((instruction or "").lower().split())
+    if not t or "project" not in t:
+        return False
+    if any(kw in t for kw in ["module", "schema", "tracker", "track my", "want to track", "start tracking", "project details"]):
+        return False
+    project_create_phrases = [
+        "create project",
+        "create a project",
+        "create new project",
+        "create a new project",
+        "new project",
+        "start project",
+        "start a project",
+        "make project",
+        "make a project",
+        "add project",
+        "add a project",
+    ]
+    return any(phrase in t for phrase in project_create_phrases)
 
 
 def _validate_route(result: dict, instruction: str) -> dict:

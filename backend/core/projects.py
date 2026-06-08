@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
+import ast
 from datetime import datetime
 from typing import Any
 
@@ -12,6 +14,10 @@ from backend.core import observability
 from backend.data import database
 
 logger = observability.get_logger(__name__)
+CODE_REWRITE_MAX_TOKENS = int(os.getenv("PERSONAL_OS_CODE_REWRITE_MAX_TOKENS", "6000"))
+CODE_REWRITE_CONTINUATION_TOKENS = int(os.getenv("PERSONAL_OS_CODE_REWRITE_CONTINUATION_TOKENS", "3000"))
+CODE_REWRITE_CONTINUATIONS = int(os.getenv("PERSONAL_OS_CODE_REWRITE_CONTINUATIONS", "2"))
+CODE_REWRITE_REPAIR_ATTEMPTS = int(os.getenv("PERSONAL_OS_CODE_REWRITE_REPAIR_ATTEMPTS", "2"))
 
 
 def init_project_tables() -> None:
@@ -42,6 +48,7 @@ def init_project_tables() -> None:
                 summary TEXT NOT NULL DEFAULT '',
                 chars INTEGER NOT NULL DEFAULT 0,
                 words INTEGER NOT NULL DEFAULT 0,
+                content_text TEXT NOT NULL DEFAULT '',
                 warnings TEXT NOT NULL DEFAULT '[]',
                 metadata TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -50,6 +57,7 @@ def init_project_tables() -> None:
             """
         )
         _ensure_column(conn, "project_files", "enabled", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(conn, "project_files", "content_text", "TEXT NOT NULL DEFAULT ''")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS project_artifacts (
@@ -205,9 +213,9 @@ def add_uploaded_files(project_id: int, files: list[Any]) -> list[dict[str, Any]
                 """
                 INSERT INTO project_files (
                     project_id, filename, content_type, source, status, summary,
-                    chars, words, warnings, metadata
+                    chars, words, content_text, warnings, metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -218,6 +226,7 @@ def add_uploaded_files(project_id: int, files: list[Any]) -> list[dict[str, Any]
                     summary,
                     len(doc.text or ""),
                     len((doc.text or "").split()),
+                    doc.text or "",
                     json.dumps(doc.warnings),
                     json.dumps(doc.metadata),
                 ),
@@ -534,6 +543,23 @@ def delete_memory(project_id: int, memory_id: int) -> None:
 def plan_project_action(project: dict[str, Any], instruction: str) -> dict[str, Any]:
     text = instruction.strip()
     lower = text.lower()
+    if _is_simple_explanation_request(text):
+        return {"type": "simple_explanation", "request": text}
+    if _is_repair_code_artifact_request(text) and _latest_code_artifact(project["id"]):
+        return {"type": "repair_latest_code_artifact", "request": text}
+    if _is_code_completeness_request(text) and _latest_code_artifact(project["id"]):
+        return {"type": "check_latest_code_artifact", "request": text}
+    if _is_continue_code_artifact_request(text) and _latest_code_artifact(project["id"]):
+        return {"type": "continue_latest_code_artifact", "request": text}
+    if _is_latest_code_artifact_request(text) and _latest_code_artifact(project["id"]):
+        return {"type": "show_latest_code_artifact"}
+    file_match = _find_referenced_file(project["id"], text)
+    if not file_match and _is_file_rewrite_request(text):
+        file_match = _find_best_code_file(project["id"])
+    if file_match and _is_file_rewrite_request(text):
+        return {"type": "rewrite_file", "file_id": file_match["id"], "filename": file_match["filename"], "request": text}
+    if file_match and _is_file_review_request(text):
+        return {"type": "review_file", "file_id": file_match["id"], "filename": file_match["filename"], "request": text}
     rename_match = re.search(r"\brename (?:this )?project to ['\"]?([^'\"]+?)['\"]?$", text, re.IGNORECASE)
     if rename_match:
         return {"type": "rename_project", "name": rename_match.group(1).strip()}
@@ -551,6 +577,112 @@ def plan_project_action(project: dict[str, Any], instruction: str) -> dict[str, 
 
 def execute_project_action(project_id: int, plan: dict[str, Any]) -> dict[str, Any] | None:
     action_type = plan.get("type")
+    if action_type == "show_latest_code_artifact":
+        artifact = _latest_code_artifact(project_id)
+        if artifact:
+            return _action_response(
+                artifact["content"],
+                "project_code_artifact",
+                project_id,
+                {"artifacts": [artifact]},
+            )
+        return _action_response("No generated code artifact exists yet.", "project_code_artifact", project_id)
+    if action_type == "check_latest_code_artifact":
+        artifact = _latest_code_artifact(project_id)
+        if not artifact:
+            return _action_response("No generated code artifact exists yet.", "project_code_check", project_id)
+        source_file = _source_file_for_artifact(project_id, artifact)
+        source_content = get_file_content(project_id, source_file["id"]) if source_file else ""
+        quality = _validate_generated_code(artifact["content"], source_content, plan.get("request", ""))
+        message = _code_quality_explanation(quality, artifact, source_file)
+        return _action_response(
+            message,
+            "project_code_check",
+            project_id,
+            {"artifacts": [artifact], "code_quality": quality, "file": source_file},
+        )
+    if action_type == "simple_explanation":
+        return _action_response(_simple_project_explanation(project_id, plan.get("request", "")), "project_simple_explanation", project_id)
+    if action_type == "continue_latest_code_artifact":
+        artifact = _latest_code_artifact(project_id)
+        if not artifact:
+            return _action_response("No generated code artifact exists yet.", "project_code_continue", project_id)
+        continuation = _continue_code_artifact(artifact, plan.get("request", "continue"))
+        updated = _append_project_artifact_content(project_id, artifact["id"], continuation)
+        return _action_response(
+            continuation,
+            "project_code_continue",
+            project_id,
+            {"artifacts": [updated]},
+        )
+    if action_type == "repair_latest_code_artifact":
+        artifact = _latest_code_artifact(project_id)
+        if not artifact:
+            return _action_response("No generated code artifact exists yet.", "project_code_repair", project_id)
+        repaired, quality, source_file = _repair_code_artifact(project_id, artifact, plan.get("request", "repair incomplete code"))
+        updated = _replace_project_artifact_content(project_id, artifact["id"], repaired)
+        return _action_response(
+            repaired,
+            "project_code_repair",
+            project_id,
+            {"artifacts": [updated], "code_quality": quality, "file": source_file},
+        )
+    if action_type == "rewrite_file":
+        file_info = get_file(int(plan.get("file_id")))
+        content = get_file_content(project_id, file_info["id"])
+        if not content.strip():
+            return _action_response(
+                "I found " + file_info["filename"] + ", but no readable text/code was extracted from it.",
+                "project_file_rewrite",
+                project_id,
+                {"file": file_info},
+            )
+        prompt = _file_rewrite_prompt(file_info["filename"], content, plan.get("request", "Rewrite this uploaded file."))
+        cfg = prompt_templates.config_for("analyze")
+        response = _ask_complete_code_rewrite(prompt, cfg["temperature"])
+        response, quality = _repair_code_rewrite_if_needed(
+            file_info["filename"],
+            content,
+            plan.get("request", "Rewrite this uploaded file."),
+            response,
+            cfg["temperature"],
+        )
+        artifact = _create_project_artifact(
+            project_id,
+            _rewrite_artifact_title(file_info["filename"], plan.get("request", "")),
+            "code",
+            response,
+        )
+        return _action_response(
+            response,
+            "project_file_rewrite",
+            project_id,
+            {
+                "file": file_info,
+                "artifacts": [artifact],
+                "sources": [{"title": file_info["filename"], "citation": file_info["filename"]}],
+                "code_quality": quality,
+            },
+        )
+    if action_type == "review_file":
+        file_info = get_file(int(plan.get("file_id")))
+        content = get_file_content(project_id, file_info["id"])
+        if not content.strip():
+            return _action_response(
+                "I found " + file_info["filename"] + ", but no readable text/code was extracted from it.",
+                "project_file_review",
+                project_id,
+                {"file": file_info},
+            )
+        prompt = _file_review_prompt(file_info["filename"], content, plan.get("request", "Review this uploaded file."))
+        cfg = prompt_templates.config_for("analyze")
+        response = brain.ask(prompt, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
+        return _action_response(
+            response,
+            "project_file_review",
+            project_id,
+            {"file": file_info, "sources": [{"title": file_info["filename"], "citation": file_info["filename"]}]},
+        )
     if action_type == "rename_project":
         updated = update_project(project_id, {"name": plan.get("name", "")})
         return _action_response("Renamed this project to " + updated["name"] + ".", "project_rename", project_id, {"project": updated})
@@ -588,22 +720,538 @@ def execute_project_action(project_id: int, plan: dict[str, Any]) -> dict[str, A
     return None
 
 
-def _maybe_create_document_artifact(project_id: int, instruction: str, content: str) -> list[dict[str, Any]]:
-    text = instruction.lower()
-    triggers = ["create a document", "write a document", "draft", "report", "proposal", "summary document"]
-    if not any(trigger in text for trigger in triggers):
-        return []
-    title = _artifact_title(instruction)
+def get_file_content(project_id: int, file_id: int) -> str:
+    init_project_tables()
+    with database.get_connection() as conn:
+        row = conn.execute(
+            "SELECT content_text FROM project_files WHERE id = ? AND project_id = ?",
+            (file_id, project_id),
+        ).fetchone()
+    if not row:
+        raise ValueError("Project file not found.")
+    return row["content_text"] or ""
+
+
+def _is_file_review_request(text: str) -> bool:
+    lower = text.lower()
+    review_terms = [
+        "check", "review", "inspect", "analyze", "analyse", "is everything ok",
+        "full code", "code ok", "data preprocessing", "preprocessing",
+    ]
+    return any(term in lower for term in review_terms)
+
+
+def _is_file_rewrite_request(text: str) -> bool:
+    lower = text.lower()
+    rewrite_terms = [
+        "rewrite", "convert", "integrate", "replace", "change the code",
+        "modify the code", "update the code", "refactor",
+    ]
+    code_terms = [
+        "code", "notebook", "model", "random forest", "catboost", "classifier",
+        "pipeline", "script", ".ipynb", ".py",
+    ]
+    return any(term in lower for term in rewrite_terms) and any(term in lower for term in code_terms)
+
+
+def _is_latest_code_artifact_request(text: str) -> bool:
+    lower = text.lower()
+    complete_terms = [
+        "complete code", "full code", "whole code", "entire code",
+        "write me the code", "give me the code", "show me the code",
+        "write me complete code", "write the complete code",
+    ]
+    return any(term in lower for term in complete_terms)
+
+
+def _is_code_completeness_request(text: str) -> bool:
+    lower = text.lower()
+    if any(term in lower for term in ["not complete", "incomplete", "fix"]):
+        return False
+    return any(term in lower for term in ["is this code complete", "is it complete", "code complete", "is this runnable", "is it okay", "is this okay"])
+
+
+def _is_simple_explanation_request(text: str) -> bool:
+    lower = text.lower()
+    return any(term in lower for term in ["i dont understand", "i don't understand", "simplify", "explain simply", "simple explanation"]) and any(
+        term in lower for term in ["cnn", "random forest", "classifier", "model", "code"]
+    )
+
+
+def _is_repair_code_artifact_request(text: str) -> bool:
+    lower = text.lower()
+    repair_terms = [
+        "not complete", "incomplete", "not full", "missing code",
+        "code is not complete", "not complete code", "fix the code",
+        "fix this code", "please fix", "properly", "deeply",
+    ]
+    return any(term in lower for term in repair_terms) and any(term in lower for term in ["code", "artifact", "script", "implementation", "complete"])
+
+
+def _is_continue_code_artifact_request(text: str) -> bool:
+    lower = text.lower()
+    return "continue" in lower and any(term in lower for term in ["code", "last line", "where it stopped", "from the last"])
+
+
+def _latest_code_artifact(project_id: int) -> dict[str, Any] | None:
+    for artifact in list_artifacts(project_id):
+        if artifact.get("type") == "code":
+            return artifact
+    return None
+
+
+def _find_referenced_file(project_id: int, text: str) -> dict[str, Any] | None:
+    lower = text.lower()
+    files = list_files(project_id)
+    if not files:
+        return None
+
+    enabled_files = [file for file in files if file.get("enabled")]
+    candidates = enabled_files or files
+    for file in candidates:
+        filename = file["filename"].lower()
+        stem = filename.rsplit(".", 1)[0]
+        if filename in lower or stem in lower:
+            return file
+
+    if len(candidates) == 1 and any(word in lower for word in ["file", "code", "notebook", "uploaded"]):
+        return candidates[0]
+    return None
+
+
+def _find_best_code_file(project_id: int) -> dict[str, Any] | None:
+    files = [file for file in list_files(project_id) if file.get("enabled")]
+    code_exts = (".ipynb", ".py", ".r", ".js", ".ts", ".tsx", ".jsx")
+    code_files = [file for file in files if file["filename"].lower().endswith(code_exts)]
+    if len(code_files) == 1:
+        return code_files[0]
+    return None
+
+
+def _file_review_prompt(filename: str, content: str, request: str) -> str:
+    return "\n\n".join(
+        [
+            "You are reviewing one uploaded project file. Review the actual file content below.",
+            "If it is code, look for bugs, data leakage, preprocessing mistakes, train/test split issues, missing imports, reproducibility issues, and unclear assumptions.",
+            "Be concrete and cite notebook cells, sections, function names, or code snippets when available.",
+            "Do not ask the user to paste the file again; the file content is provided.",
+            "Filename: " + filename,
+            "User request:\n" + safeguards.wrap_user_text(request, "REQUEST"),
+            "Uploaded file content:\n"
+            + safeguards.wrap_user_text(
+                safeguards.truncate_text(content, safeguards.MAX_PROMPT_CHARS - 2500, "uploaded file content"),
+                "UPLOADED_FILE",
+            ),
+        ]
+    )
+
+
+def _file_rewrite_prompt(filename: str, content: str, request: str) -> str:
+    return "\n\n".join(
+        [
+            "You are rewriting one uploaded project code file. Use the complete file content below, not only a retrieved passage.",
+            "Return a complete rewritten implementation that the user can use directly. Do not only describe what to change.",
+            "If the source is a notebook, preserve the logical notebook flow as clearly separated cells or a runnable Python script.",
+            "When converting models, update imports, preprocessing, feature selection, training, evaluation, and reporting consistently.",
+            "Avoid data leakage: fit scalers/selectors only on training data, then transform validation/test data.",
+            "Include concise notes after the code only for important assumptions or required packages.",
+            "Do not ask the user to paste the file again; the file content is provided.",
+            "Filename: " + filename,
+            "User request:\n" + safeguards.wrap_user_text(request, "REQUEST"),
+            "Uploaded file content:\n"
+            + safeguards.wrap_user_text(
+                safeguards.truncate_text(content, safeguards.MAX_PROMPT_CHARS - 3200, "uploaded file content"),
+                "UPLOADED_FILE",
+            ),
+        ]
+    )
+
+
+def _ask_complete_code_rewrite(prompt: str, temperature: float) -> str:
+    response = brain.ask(
+        prompt,
+        temperature=temperature,
+        max_tokens=CODE_REWRITE_MAX_TOKENS,
+        max_output_chars=CODE_REWRITE_MAX_TOKENS * 5,
+    )
+    for _ in range(max(0, CODE_REWRITE_CONTINUATIONS)):
+        if not _looks_truncated_code_response(response):
+            break
+        continuation_prompt = _code_continuation_prompt(response)
+        continuation = brain.ask(
+            continuation_prompt,
+            temperature=temperature,
+            max_tokens=CODE_REWRITE_CONTINUATION_TOKENS,
+            max_output_chars=CODE_REWRITE_CONTINUATION_TOKENS * 5,
+        )
+        response = _merge_code_continuation(response, continuation)
+    if _looks_truncated_code_response(response):
+        response += (
+            "\n\n[Note: The generated code may still be incomplete because the model output ended before "
+            "a clean stopping point. Ask: continue the code from the last line.]"
+        )
+    return response
+
+
+def _repair_code_rewrite_if_needed(
+    filename: str,
+    source_content: str,
+    request: str,
+    response: str,
+    temperature: float,
+) -> tuple[str, dict[str, Any]]:
+    current = response
+    quality = _validate_generated_code(current, source_content, request)
+    for _ in range(max(0, CODE_REWRITE_REPAIR_ATTEMPTS)):
+        if quality["ok"]:
+            break
+        repair_prompt = _code_repair_prompt(filename, source_content, request, current, quality["issues"])
+        current = brain.ask(
+            repair_prompt,
+            temperature=temperature,
+            max_tokens=CODE_REWRITE_MAX_TOKENS,
+            max_output_chars=CODE_REWRITE_MAX_TOKENS * 5,
+        )
+        for _ in range(max(0, CODE_REWRITE_CONTINUATIONS)):
+            if not _looks_truncated_code_response(current):
+                break
+            continuation = brain.ask(
+                _code_continuation_prompt(current),
+                temperature=temperature,
+                max_tokens=CODE_REWRITE_CONTINUATION_TOKENS,
+                max_output_chars=CODE_REWRITE_CONTINUATION_TOKENS * 5,
+            )
+            current = _merge_code_continuation(current, continuation)
+        quality = _validate_generated_code(current, source_content, request)
+    if not quality["ok"]:
+        current += "\n\n[Code quality warning: " + "; ".join(quality["issues"][:5]) + "]"
+    return current, quality
+
+
+def _validate_generated_code(content: str, source_content: str = "", request: str = "") -> dict[str, Any]:
+    issues: list[str] = []
+    code = _extract_python_code(content)
+    lower = content.lower()
+    source_lower = source_content.lower()
+    request_lower = request.lower()
+
+    if _looks_truncated_code_response(content):
+        issues.append("output appears truncated or has an unclosed code fence")
+    if len(code.strip()) < 800:
+        issues.append("generated code is too short to be a complete rewrite")
+    if "random forest" in request_lower and "randomforestclassifier" not in lower:
+        issues.append("missing RandomForestClassifier for the requested Random Forest rewrite")
+
+    invented_markers = [
+        "mmash_dataset.csv",
+        "assuming",
+        "placeholder",
+        "your/path",
+        "path/to",
+        "todo",
+    ]
+    for marker in invented_markers:
+        if marker in lower and marker not in source_lower:
+            issues.append("contains invented placeholder/generic marker: " + marker)
+
+    if "update this path" in lower and "do not use placeholders" in request_lower:
+        issues.append("contains placeholder path instruction despite no-placeholder request")
+    if any(term in lower for term in ["torch.device", "conv1d", "cnn"]) and "random forest" in request_lower:
+        issues.append("still contains CNN/PyTorch-specific code in a Random Forest rewrite")
+
+    try:
+        ast.parse(code)
+    except SyntaxError as exc:
+        issues.append("python syntax error: " + str(exc))
+    except Exception as exc:
+        issues.append("python validation failed: " + str(exc))
+
+    return {"ok": not issues, "issues": issues}
+
+
+def _code_quality_explanation(
+    quality: dict[str, Any],
+    artifact: dict[str, Any],
+    source_file: dict[str, Any] | None,
+) -> str:
+    if quality.get("ok"):
+        return (
+            "Short answer: yes, the latest code artifact looks structurally complete.\n\n"
+            "I checked for syntax problems, obvious placeholders, truncated code fences, missing Random Forest usage, "
+            "and generic invented dataset paths. I would still run it locally against your data before trusting the metrics."
+        )
+    lines = [
+        "Short answer: no, this code is not complete enough to trust yet.",
+        "",
+        "Main problems:",
+    ]
+    for issue in quality.get("issues", [])[:6]:
+        lines.append("- " + issue)
+    if source_file:
+        lines.extend([
+            "",
+            "Best next step: ask me to repair it from `" + source_file["filename"] + "` so the code follows the uploaded notebook instead of using generic assumptions.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Best next step: upload or enable the original notebook/script, then ask me to repair the generated code.",
+        ])
+    return "\n".join(lines)
+
+
+def _simple_project_explanation(project_id: int, request: str) -> str:
+    artifact = _latest_code_artifact(project_id)
+    quality = _validate_generated_code(artifact["content"], "", request) if artifact else {"ok": False, "issues": ["no generated code artifact exists yet"]}
+    lines = [
+        "Simple version:",
+        "",
+        "- The CNN model is a deep-learning model. It learns patterns directly from signal windows, but it needs more setup and training code.",
+        "- The Random Forest classifier is a simpler machine-learning model. It needs fixed numeric features first, then it learns decision trees from those features.",
+        "- To replace CNN with Random Forest, the signal-processing/data-loading part should mostly stay the same, but the CNN training part should be replaced with feature flattening, scaling, optional SMOTE, RandomForestClassifier, and evaluation.",
+    ]
+    if artifact:
+        lines.append("- Your latest generated Random Forest code is " + ("structurally okay." if quality.get("ok") else "not complete yet."))
+        if not quality.get("ok"):
+            lines.append("- The main issue is: " + "; ".join(quality.get("issues", [])[:3]))
+    lines.extend([
+        "",
+        "What you should ask next:",
+        "`fix the latest Random Forest code using the uploaded notebook, keep it simple and runnable`",
+    ])
+    return "\n".join(lines)
+
+
+def _extract_python_code(content: str) -> str:
+    fences = re.findall(r"```(?:python|py)?\s*\n(.*?)```", content or "", flags=re.DOTALL | re.IGNORECASE)
+    if fences:
+        return max(fences, key=len)
+    return content or ""
+
+
+def _code_repair_prompt(
+    filename: str,
+    source_content: str,
+    request: str,
+    failed_output: str,
+    issues: list[str],
+) -> str:
+    return "\n\n".join(
+        [
+            "The previous code rewrite failed validation. Regenerate the full answer from scratch.",
+            "Return one complete runnable Python script inside a single python code fence.",
+            "Do not use placeholders, invented dataset files, invented folders, ellipses, TODOs, or generic templates.",
+            "Do not use a consolidated mmash_dataset.csv unless that exact file appears in the uploaded notebook.",
+            "Preserve the uploaded notebook's actual data-loading strategy, file names, subject discovery, feature extraction, evaluation protocol, and metrics where possible.",
+            "Convert the model to RandomForestClassifier consistently. Remove CNN/PyTorch training code unless it is only mentioned in comments explaining what changed.",
+            "Fit scalers/selectors only on training folds to avoid leakage.",
+            "Validation issues:\n- " + "\n- ".join(issues),
+            "Filename: " + filename,
+            "User request:\n" + safeguards.wrap_user_text(request, "REQUEST"),
+            "Uploaded notebook/script content:\n"
+            + safeguards.wrap_user_text(
+                safeguards.truncate_text(source_content, safeguards.MAX_PROMPT_CHARS - 6500, "uploaded file content"),
+                "UPLOADED_FILE",
+            ),
+            "Rejected output for reference:\n"
+            + safeguards.wrap_user_text(
+                safeguards.truncate_text(failed_output, 5000, "rejected output"),
+                "REJECTED_OUTPUT",
+            ),
+        ]
+    )
+
+
+def _looks_truncated_code_response(response: str) -> bool:
+    text = (response or "").rstrip()
+    if not text:
+        return True
+    if text.count("```") % 2 == 1:
+        return True
+    last_line = text.splitlines()[-1].strip()
+    if not last_line:
+        return False
+    dangling_endings = ("(", "[", "{", "\\", "=", ",", "+", "-", "*", "/", ":", "and", "or")
+    if last_line.endswith(dangling_endings):
+        return True
+    if last_line.count("'") % 2 == 1 or last_line.count('"') % 2 == 1:
+        return True
+    return False
+
+
+def _code_continuation_prompt(previous_response: str) -> str:
+    tail = "\n".join(previous_response.rstrip().splitlines()[-80:])
+    return "\n\n".join(
+        [
+            "Continue the incomplete code response below from exactly where it stopped.",
+            "Return only the continuation. Do not restart from the beginning. Do not summarize.",
+            "If a code fence is open, close it after completing the code.",
+            "Previous response tail:\n" + safeguards.wrap_user_text(tail, "PREVIOUS_RESPONSE_TAIL"),
+        ]
+    )
+
+
+def _merge_code_continuation(response: str, continuation: str) -> str:
+    clean = continuation.strip()
+    if clean.startswith("```python"):
+        clean = clean[len("```python"):].lstrip()
+    elif clean.startswith("```"):
+        clean = clean[len("```"):].lstrip()
+    return response.rstrip() + "\n" + clean
+
+
+def _continue_code_artifact(artifact: dict[str, Any], request: str) -> str:
+    content = artifact.get("content", "")
+    prompt = "\n\n".join(
+        [
+            "Continue the latest project code artifact from exactly where it stopped.",
+            "Return only the missing continuation. Do not restart the file. Do not explain.",
+            "If the previous artifact contains an incompleteness note, ignore the note and continue the code before it.",
+            "User request:\n" + safeguards.wrap_user_text(request, "REQUEST"),
+            "Artifact title: " + str(artifact.get("title", "code artifact")),
+            "Artifact tail:\n" + safeguards.wrap_user_text(_artifact_tail_for_continuation(content), "ARTIFACT_TAIL"),
+        ]
+    )
+    continuation = brain.ask(
+        prompt,
+        temperature=0.2,
+        max_tokens=CODE_REWRITE_CONTINUATION_TOKENS,
+        max_output_chars=CODE_REWRITE_CONTINUATION_TOKENS * 5,
+    )
+    return _strip_code_restart(_clean_continuation(continuation))
+
+
+def _artifact_tail_for_continuation(content: str) -> str:
+    cleaned = re.sub(r"\n\n\[Note: The generated code may still be incomplete.*?\]\s*$", "", content or "", flags=re.DOTALL)
+    return "\n".join(cleaned.rstrip().splitlines()[-120:])
+
+
+def _clean_continuation(continuation: str) -> str:
+    clean = (continuation or "").strip()
+    if clean.startswith("```python"):
+        clean = clean[len("```python"):].lstrip()
+    elif clean.startswith("```"):
+        clean = clean[len("```"):].lstrip()
+    return clean
+
+
+def _strip_code_restart(continuation: str) -> str:
+    clean = continuation.strip()
+    restart_markers = [
+        "# MMASH",
+        "import sys",
+        "import numpy",
+        "from sklearn",
+        "Below is",
+        "Certainly",
+        "To continue",
+    ]
+    lines = clean.splitlines()
+    if lines and any(lines[0].lstrip().startswith(marker) for marker in restart_markers):
+        return clean
+    return clean
+
+
+def _append_project_artifact_content(project_id: int, artifact_id: int, continuation: str) -> dict[str, Any]:
+    with database.get_connection() as conn:
+        row = conn.execute(
+            "SELECT content FROM project_artifacts WHERE id = ? AND project_id = ?",
+            (artifact_id, project_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Artifact not found.")
+        base = re.sub(
+            r"\n\n\[Note: The generated code may still be incomplete.*?\]\s*$",
+            "",
+            row["content"] or "",
+            flags=re.DOTALL,
+        ).rstrip()
+        merged = base + "\n" + continuation.strip()
+        conn.execute("UPDATE project_artifacts SET content = ? WHERE id = ? AND project_id = ?", (merged, artifact_id, project_id))
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (datetime.now().isoformat(), project_id))
+        conn.commit()
+    return get_artifact(artifact_id)
+
+
+def _repair_code_artifact(
+    project_id: int,
+    artifact: dict[str, Any],
+    request: str,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    source_file = _source_file_for_artifact(project_id, artifact)
+    source_content = get_file_content(project_id, source_file["id"]) if source_file else ""
+    filename = source_file["filename"] if source_file else str(artifact.get("title", "code artifact"))
+    current = artifact.get("content", "")
+    initial_quality = _validate_generated_code(current, source_content, request)
+    if initial_quality["ok"]:
+        initial_quality["issues"] = ["User asked to repair the latest code artifact."]
+    repaired, quality = _repair_code_rewrite_if_needed(
+        filename,
+        source_content,
+        request + "\nRepair the latest generated code artifact.",
+        current,
+        0.2,
+    )
+    return repaired, quality, source_file
+
+
+def _source_file_for_artifact(project_id: int, artifact: dict[str, Any]) -> dict[str, Any] | None:
+    title = str(artifact.get("title", "")).lower()
+    files = list_files(project_id)
+    for file in files:
+        filename = file["filename"].lower()
+        if filename and filename in title:
+            return file
+    code_file = _find_best_code_file(project_id)
+    if code_file:
+        return code_file
+    enabled = [file for file in files if file.get("enabled")]
+    return enabled[0] if len(enabled) == 1 else None
+
+
+def _replace_project_artifact_content(project_id: int, artifact_id: int, content: str) -> dict[str, Any]:
+    with database.get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE project_artifacts SET content = ? WHERE id = ? AND project_id = ?",
+            (content, artifact_id, project_id),
+        )
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (datetime.now().isoformat(), project_id))
+        conn.commit()
+    if cursor.rowcount == 0:
+        raise ValueError("Artifact not found.")
+    return get_artifact(artifact_id)
+
+
+def _create_project_artifact(project_id: int, title: str, artifact_type: str, content: str) -> dict[str, Any]:
     with database.get_connection() as conn:
         cursor = conn.execute(
             """
             INSERT INTO project_artifacts (project_id, title, type, content)
             VALUES (?, ?, ?, ?)
             """,
-            (project_id, title, "document", content),
+            (project_id, title[:160], artifact_type[:40], content),
         )
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (datetime.now().isoformat(), project_id))
         conn.commit()
-    return [dict(get_artifact(cursor.lastrowid))]
+    return dict(get_artifact(cursor.lastrowid))
+
+
+def _rewrite_artifact_title(filename: str, request: str) -> str:
+    lower = request.lower()
+    if "random forest" in lower:
+        prefix = "Random Forest rewrite"
+    else:
+        prefix = "Code rewrite"
+    return prefix + " - " + filename
+
+
+def _maybe_create_document_artifact(project_id: int, instruction: str, content: str) -> list[dict[str, Any]]:
+    text = instruction.lower()
+    triggers = ["create a document", "write a document", "draft", "report", "proposal", "summary document"]
+    if not any(trigger in text for trigger in triggers):
+        return []
+    title = _artifact_title(instruction)
+    return [_create_project_artifact(project_id, title, "document", content)]
 
 
 def get_artifact(artifact_id: int) -> dict[str, Any]:
@@ -653,6 +1301,7 @@ def _project_row(row: sqlite3.Row) -> dict[str, Any]:
 
 def _file_row(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
+    data.pop("content_text", None)
     data["enabled"] = bool(data.get("enabled", 1))
     data["warnings"] = _json_loads(data.get("warnings"), [])
     data["metadata"] = _json_loads(data.get("metadata"), {})

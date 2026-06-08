@@ -13,6 +13,8 @@ Implements:
 Environment:
 - GROQ_API_KEY for Groq
 - OLLAMA_BASE_URL / OLLAMA_MODEL for local Ollama fallback
+- OPENROUTER_API_KEY for OpenRouter fallback
+- GEMINI_API_KEY for Google Gemini fallback
 
 Groq uses the OpenAI-compatible Chat Completions API.
 """
@@ -33,7 +35,20 @@ GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-coder-32b-instruct")
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "http://localhost:5173")
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "Personal OS")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 MODEL_BACKEND = os.getenv("PERSONAL_OS_MODEL_BACKEND", "auto").lower()
+MODEL_ORDER = [
+    item.strip().lower()
+    for item in os.getenv("PERSONAL_OS_MODEL_ORDER", "groq,ollama,openrouter,gemini").split(",")
+    if item.strip()
+]
 
 
 MODEL_RETRIES = int(os.getenv("PERSONAL_OS_MODEL_RETRIES", "2"))
@@ -48,7 +63,7 @@ def is_groq_available() -> bool:
 
 
 def is_ollama_available() -> bool:
-    if MODEL_BACKEND == "groq":
+    if MODEL_BACKEND not in {"auto", "ollama"}:
         return False
     try:
         response = requests.get(OLLAMA_BASE_URL.rstrip("/") + "/api/tags", timeout=2)
@@ -57,11 +72,21 @@ def is_ollama_available() -> bool:
         return False
 
 
+def is_openrouter_available() -> bool:
+    return bool(OPENROUTER_API_KEY)
+
+
+def is_gemini_available() -> bool:
+    return bool(GEMINI_API_KEY)
+
+
 
 
 def get_status() -> dict:
     groq_ok = is_groq_available()
     ollama_ok = is_ollama_available()
+    openrouter_ok = is_openrouter_available()
+    gemini_ok = is_gemini_available()
     backends = _available_backends()
     active = backends[0] if backends else ""
     return {
@@ -69,10 +94,15 @@ def get_status() -> dict:
         "groq_model": GROQ_MODEL,
         "ollama_available": ollama_ok,
         "ollama_model": OLLAMA_MODEL,
+        "openrouter_available": openrouter_ok,
+        "openrouter_model": OPENROUTER_MODEL,
+        "gemini_available": gemini_ok,
+        "gemini_model": GEMINI_MODEL,
         "configured_backend": MODEL_BACKEND,
+        "model_order": MODEL_ORDER,
 
         "active_backend": active,
-        "model": GROQ_MODEL if active == "groq" else OLLAMA_MODEL if active == "ollama" else "",
+        "model": _model_for_backend(active),
 
         "ready": bool(active),
     }
@@ -85,6 +115,7 @@ def ask(
     system: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 2048,
+    max_output_chars: int | None = None,
 ) -> str:
 
     """Send a prompt and return the full response as a string."""
@@ -101,6 +132,10 @@ def ask(
                 result = _ask_groq(prompt=prompt, system=system, temperature=temperature, max_tokens=max_tokens)
             elif candidate == "ollama":
                 result = _ask_ollama(prompt=prompt, system=system, temperature=temperature, max_tokens=max_tokens)
+            elif candidate == "openrouter":
+                result = _ask_openrouter(prompt=prompt, system=system, temperature=temperature, max_tokens=max_tokens)
+            elif candidate == "gemini":
+                result = _ask_gemini(prompt=prompt, system=system, temperature=temperature, max_tokens=max_tokens)
             break
         except Exception as exc:
             errors.append(candidate + ": " + str(exc))
@@ -114,14 +149,15 @@ def ask(
         logger,
         "model.request",
         backend=backend,
-        model=GROQ_MODEL if backend == "groq" else OLLAMA_MODEL,
+        model=_model_for_backend(backend),
         latency_ms=round((time.perf_counter() - start) * 1000, 2),
         prompt_chars=len(prompt),
         output_chars=len(result),
         tokens=None,
     )
 
-    return safeguards.trim_output(result)
+    output_limit = max_output_chars if max_output_chars is not None else max(safeguards.MAX_OUTPUT_CHARS, max_tokens * 4)
+    return safeguards.truncate_text(result, output_limit, "output")
 
 
 def ask_json(
@@ -183,6 +219,10 @@ def ask_stream(
                 yield from _stream_groq(prompt=prompt, system=system, temperature=temperature)
             elif candidate == "ollama":
                 yield from _stream_ollama(prompt=prompt, system=system, temperature=temperature)
+            elif candidate == "openrouter":
+                yield from _stream_openrouter(prompt=prompt, system=system, temperature=temperature)
+            elif candidate == "gemini":
+                yield _ask_gemini(prompt=prompt, system=system, temperature=temperature, max_tokens=2048)
             return
         except Exception as exc:
             errors.append(candidate + ": " + str(exc))
@@ -216,6 +256,10 @@ def ask_with_history(
                 return _chat_groq(messages=messages, system=system, temperature=temperature)
             if candidate == "ollama":
                 return _chat_ollama(messages=messages, system=system, temperature=temperature)
+            if candidate == "openrouter":
+                return _chat_openrouter(messages=messages, system=system, temperature=temperature)
+            if candidate == "gemini":
+                return _chat_gemini(messages=messages, system=system, temperature=temperature)
         except Exception as exc:
             errors.append(candidate + ": " + str(exc))
             observability.log_event(logger, "model.history_fallback", backend=candidate, reason=str(exc))
@@ -227,16 +271,31 @@ def ask_with_history(
 # ------------------------------
 
 def _available_backends() -> list[str]:
-    if MODEL_BACKEND == "groq":
-        return ["groq"] if is_groq_available() else []
-    if MODEL_BACKEND == "ollama":
-        return ["ollama"] if is_ollama_available() else []
+    backend_checks = {
+        "groq": is_groq_available,
+        "ollama": is_ollama_available,
+        "openrouter": is_openrouter_available,
+        "gemini": is_gemini_available,
+    }
+    if MODEL_BACKEND != "auto":
+        checker = backend_checks.get(MODEL_BACKEND)
+        return [MODEL_BACKEND] if checker and checker() else []
     backends = []
-    if is_groq_available():
-        backends.append("groq")
-    if is_ollama_available():
-        backends.append("ollama")
+    for backend in MODEL_ORDER:
+        checker = backend_checks.get(backend)
+        if checker and checker():
+            backends.append(backend)
     return backends
+
+
+def _model_for_backend(backend: str) -> str:
+    models = {
+        "groq": GROQ_MODEL,
+        "ollama": OLLAMA_MODEL,
+        "openrouter": OPENROUTER_MODEL,
+        "gemini": GEMINI_MODEL,
+    }
+    return models.get(backend, "")
 
 
 # ------------------------------
@@ -355,6 +414,144 @@ def _stream_groq(prompt: str, system: str | None, temperature: float):
                     yield content
             except Exception:
                 continue
+
+
+# ------------------------------
+# OpenRouter implementation
+# ------------------------------
+
+def _openrouter_headers() -> dict:
+    return {
+        "Authorization": "Bearer " + OPENROUTER_API_KEY,
+        "Content-Type": "application/json",
+        "HTTP-Referer": OPENROUTER_SITE_URL,
+        "X-Title": OPENROUTER_APP_NAME,
+    }
+
+
+def _ask_openrouter(prompt: str, system: str | None, temperature: float, max_tokens: int) -> str:
+    return _chat_openrouter(_build_messages(prompt, None), system=system, temperature=temperature, max_tokens=max_tokens)
+
+
+def _chat_openrouter(
+    messages: list,
+    system: str | None,
+    temperature: float,
+    max_tokens: int = 2048,
+) -> str:
+    full_messages = []
+    if system:
+        full_messages.append({"role": "system", "content": system})
+    full_messages.extend(messages)
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": full_messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+
+    def request():
+        response = requests.post(
+            OPENROUTER_BASE_URL.rstrip("/") + "/chat/completions",
+            headers=_openrouter_headers(),
+            json=payload,
+            timeout=GROQ_TIMEOUT,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+
+    try:
+        return _with_retries(request, "openrouter")
+    except Exception as e:
+        raise RuntimeError("OpenRouter request failed: " + str(e))
+
+
+def _stream_openrouter(prompt: str, system: str | None, temperature: float):
+    messages = _build_messages(prompt, system)
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": 2048,
+        "stream": True,
+    }
+    with requests.post(
+        OPENROUTER_BASE_URL.rstrip("/") + "/chat/completions",
+        headers=_openrouter_headers(),
+        json=payload,
+        stream=True,
+        timeout=GROQ_TIMEOUT,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            decoded = line.decode("utf-8")
+            if decoded.startswith("data: "):
+                decoded = decoded[6:]
+            if decoded == "[DONE]":
+                break
+            try:
+                chunk = json.loads(decoded)
+                content = chunk["choices"][0]["delta"].get("content", "")
+                if content:
+                    yield content
+            except Exception:
+                continue
+
+
+# ------------------------------
+# Gemini implementation
+# ------------------------------
+
+def _gemini_contents(messages: list) -> list[dict]:
+    contents = []
+    for message in messages:
+        role = "model" if message.get("role") == "assistant" else "user"
+        content = str(message.get("content", ""))
+        if content:
+            contents.append({"role": role, "parts": [{"text": content}]})
+    return contents or [{"role": "user", "parts": [{"text": ""}]}]
+
+
+def _ask_gemini(prompt: str, system: str | None, temperature: float, max_tokens: int) -> str:
+    messages = _build_messages(prompt, None)
+    return _chat_gemini(messages, system=system, temperature=temperature, max_tokens=max_tokens)
+
+
+def _chat_gemini(
+    messages: list,
+    system: str | None,
+    temperature: float,
+    max_tokens: int = 2048,
+) -> str:
+    payload = {
+        "contents": _gemini_contents(messages),
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        },
+    }
+    if system:
+        payload["systemInstruction"] = {"parts": [{"text": system}]}
+
+    def request():
+        response = requests.post(
+            GEMINI_BASE_URL.rstrip("/") + "/models/" + GEMINI_MODEL + ":generateContent",
+            params={"key": GEMINI_API_KEY},
+            json=payload,
+            timeout=GROQ_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        return "".join(str(part.get("text", "")) for part in parts).strip()
+
+    try:
+        return _with_retries(request, "gemini")
+    except Exception as e:
+        raise RuntimeError("Gemini request failed: " + str(e))
 
 
 # ------------------------------

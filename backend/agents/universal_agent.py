@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime
 
 from backend.core import brain
-from backend.core import artifacts, observability, prompt_templates, rag, safeguards
+from backend.core import artifacts, observability, projects, prompt_templates, rag, safeguards
 from backend.data import database, excel_manager
 from backend.engine import schema_engine
 
@@ -310,6 +310,7 @@ def execute(route: dict, context: dict = None) -> dict:
         "export":        _handle_export,
         "schedule":      _handle_schedule,
         "create_module": _handle_create_module,
+        "create_project": _handle_create_project,
         "check_email":   _handle_check_email,
     }
 
@@ -780,6 +781,50 @@ def _handle_create_module(module, params, context):
         )
     except ValueError as e:
         return _error(str(e))
+
+
+def _handle_create_project(module, params, context):
+    raw = params.get("raw_instruction", "")
+    name = params.get("name") or _infer_project_name(raw)
+    if not name:
+        return _clarify(
+            "What should I name the project?",
+            "create_project",
+            meta={"suggested_format": "Create a project named Rayhan"},
+        )
+
+    try:
+        project = projects.create_project(
+            name,
+            params.get("description", ""),
+            params.get("instructions", ""),
+        )
+        return _success(
+            "Created project '" + project["name"] + "'. It will appear in the Projects section.",
+            data=project,
+            action="create_project",
+            meta={"project_id": project["id"], "refresh": ["projects"]},
+        )
+    except ValueError as e:
+        return _error(str(e))
+
+
+def _infer_project_name(raw: str) -> str:
+    text = " ".join((raw or "").strip().split())
+    patterns = [
+        r"\bcreate(?:\s+a|\s+new|\s+a\s+new)?\s+project(?:\s+(?:named|called|for))?\s+(.+)$",
+        r"\bstart(?:\s+a|\s+new|\s+a\s+new)?\s+project(?:\s+(?:named|called|for))?\s+(.+)$",
+        r"\bmake(?:\s+a|\s+new|\s+a\s+new)?\s+project(?:\s+(?:named|called|for))?\s+(.+)$",
+        r"\badd(?:\s+a|\s+new|\s+a\s+new)?\s+project(?:\s+(?:named|called|for))?\s+(.+)$",
+        r"\bnew\s+project(?:\s+(?:named|called|for))?\s+(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            name = match.group(1).strip(" .,:;!?\"'")
+            name = re.sub(r"^(named|called|for)\s+", "", name, flags=re.IGNORECASE).strip(" .,:;!?\"'")
+            return name[:120]
+    return ""
 
 
 def _handle_check_email(module, params, context):

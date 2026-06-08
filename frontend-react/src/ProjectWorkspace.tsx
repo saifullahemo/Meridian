@@ -84,6 +84,7 @@ export default function ProjectWorkspace({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const projectFileInputRef = useRef<HTMLInputElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
   const loadProject = useCallback(async () => {
@@ -333,6 +334,7 @@ export default function ProjectWorkspace({
   function clearFiles() {
     setFiles([]);
     if (fileInputRef.current) fileInputRef.current.value = '';
+    if (projectFileInputRef.current) projectFileInputRef.current.value = '';
   }
 
   if (!activeProjectId || !project) {
@@ -514,6 +516,28 @@ export default function ProjectWorkspace({
         <div className="panel">
           <div className="panelHeader">
             <h2>Files</h2>
+          </div>
+          <div className="projectFileUpload">
+            <input
+              ref={projectFileInputRef}
+              className="fileInput"
+              type="file"
+              multiple
+              onChange={(e) => setFiles(e.currentTarget.files ? Array.from(e.currentTarget.files) : [])}
+            />
+            <div className="fileUploadActions">
+              <button className="btn primary" type="button" onClick={uploadFilesOnly} disabled={loading || !files.length}>
+                {loading ? 'Uploading...' : 'Upload to Project'}
+              </button>
+              {files.length ? <button className="btn secondary" type="button" onClick={clearFiles}>Clear</button> : null}
+            </div>
+            {files.length ? (
+              <div className="filePreview">
+                {files.map((file) => <span className="fileChip" key={file.name}>{file.name}</span>)}
+              </div>
+            ) : (
+              <div className="hint">Uploaded files stay with this project and are used in future project chat.</div>
+            )}
           </div>
           <div className="ragSourceList">
             {(project.files || []).map((file) => (

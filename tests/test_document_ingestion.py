@@ -28,6 +28,20 @@ def test_extract_json_pretty_prints():
     assert '"company": "Acme"' in result.text
 
 
+def test_extract_ipynb_preserves_code_cells():
+    raw = (
+        b'{"cells":[{"cell_type":"markdown","source":["# Stress model"]},'
+        b'{"cell_type":"code","source":["import pandas as pd\\n","df = pd.read_csv(\\"x.csv\\")"]}]}'
+    )
+
+    result = document_ingestion.extract_bytes("catboost_stress_predict.ipynb", raw)
+
+    assert result.success is True
+    assert "Cell 1 [markdown]" in result.text
+    assert "Cell 2 [code]" in result.text
+    assert "df = pd.read_csv" in result.text
+
+
 def test_extract_xlsx_preserves_sheet_name():
     openpyxl = pytest.importorskip("openpyxl")
     workbook = openpyxl.Workbook()

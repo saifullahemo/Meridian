@@ -64,6 +64,8 @@ Module schemas require `label`, `description`, and `fields`. Field types are `te
 
 ## AI Backends
 
+The backend can use Groq, Ollama, OpenRouter, and Gemini. In `auto` mode it tries the configured order until one succeeds.
+
 Groq is optional:
 
 ```bash
@@ -75,6 +77,34 @@ Ollama is local:
 ```bash
 ollama serve
 ollama pull llama3.2
+```
+
+Better local coding fallback:
+
+```bash
+ollama pull qwen2.5-coder:7b
+OLLAMA_MODEL=qwen2.5-coder:7b
+```
+
+OpenRouter fallback:
+
+```bash
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=qwen/qwen-2.5-coder-32b-instruct
+```
+
+Gemini fallback:
+
+```bash
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-1.5-flash
+```
+
+Backend selection:
+
+```bash
+PERSONAL_OS_MODEL_BACKEND=auto
+PERSONAL_OS_MODEL_ORDER=groq,ollama,openrouter,gemini
 ```
 
 Recommended local embeddings:

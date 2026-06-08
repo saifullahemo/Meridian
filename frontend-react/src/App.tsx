@@ -227,7 +227,14 @@ export default function App() {
         ) : null}
         {mode === 'resume' ? <ResumeView api={api} /> : null}
         {mode === 'jobs' ? <JobsView api={api} sessionId={sessionId} /> : null}
-        {mode === 'chat' ? <ConversationMode apiBaseUrl={apiBase} sessionId={sessionId} setSessionId={setSessionId} /> : null}
+        {mode === 'chat' ? (
+          <ConversationMode
+            apiBaseUrl={apiBase}
+            sessionId={sessionId}
+            setSessionId={setSessionId}
+            onProjectsChanged={refreshProjects}
+          />
+        ) : null}
         {mode === 'data' ? (
           <ProjectWorkspace
             api={api}
@@ -388,8 +395,8 @@ function DataView({
     return (
       <section className="dataLayout">
         {error ? <div className="notice error">{error}</div> : null}
-        <div className="emptyState">No project selected. Create anything you want to track.</div>
-        <button className="btn primary" type="button" onClick={() => openModuleEditor(true)}>Create Project</button>
+        <div className="emptyState">No tracker selected. Create anything you want to track.</div>
+        <button className="btn primary" type="button" onClick={() => openModuleEditor(true)}>Create Tracker</button>
       </section>
     );
   }
@@ -400,29 +407,41 @@ function DataView({
         {error ? <div className="notice error">{error}</div> : null}
         <div className="panel moduleEditor">
           <div className="panelHeader">
-            <h2>Create Project</h2>
+            <h2>Create Tracker</h2>
           </div>
           <div className="formPanel">
             <label className="field">
               <span>Key</span>
-              <input value={moduleDraft.key} onChange={(e) => setModuleDraft((prev) => ({ ...prev, key: e.currentTarget.value }))} placeholder="travel_plans" />
+              <input value={moduleDraft.key} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setModuleDraft((prev) => ({ ...prev, key: value }));
+              }} placeholder="travel_plans" />
             </label>
             <label className="field">
               <span>Label</span>
-              <input value={moduleDraft.label} onChange={(e) => setModuleDraft((prev) => ({ ...prev, label: e.currentTarget.value }))} placeholder="Travel Plans" />
+              <input value={moduleDraft.label} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setModuleDraft((prev) => ({ ...prev, label: value }));
+              }} placeholder="Travel Plans" />
             </label>
             <label className="field">
               <span>Icon</span>
-              <input value={moduleDraft.icon} onChange={(e) => setModuleDraft((prev) => ({ ...prev, icon: e.currentTarget.value }))} placeholder="✈" />
+              <input value={moduleDraft.icon} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setModuleDraft((prev) => ({ ...prev, icon: value }));
+              }} placeholder="*" />
             </label>
             <label className="field">
               <span>Description</span>
-              <input value={moduleDraft.description} onChange={(e) => setModuleDraft((prev) => ({ ...prev, description: e.currentTarget.value }))} placeholder="Track anything you want" />
+              <input value={moduleDraft.description} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setModuleDraft((prev) => ({ ...prev, description: value }));
+              }} placeholder="Track anything you want" />
             </label>
-            <ProjectFieldBuilder fields={moduleDraft.fields} onAdd={addDraftField} onRemove={removeDraftField} onChange={updateDraftField} />
+            <ModuleFieldBuilder fields={moduleDraft.fields} onAdd={addDraftField} onRemove={removeDraftField} onChange={updateDraftField} />
             <div className="formActions">
               <button className="btn secondary" type="button" onClick={() => setShowModuleEditor(false)}>Cancel</button>
-              <button className="btn primary" type="button" onClick={saveModule}>Create Project</button>
+              <button className="btn primary" type="button" onClick={saveModule}>Create Tracker</button>
             </div>
           </div>
         </div>
@@ -481,8 +500,8 @@ function DataView({
         <button className="btn primary" type="button" onClick={() => setShowForm((value) => !value)}>
           {showForm ? 'Close' : 'Add'}
         </button>
-        <button className="btn secondary" type="button" onClick={() => openModuleEditor(false)}>Edit Project</button>
-        <button className="btn secondary" type="button" onClick={() => openModuleEditor(true)}>New Project</button>
+        <button className="btn secondary" type="button" onClick={() => openModuleEditor(false)}>Edit Tracker</button>
+        <button className="btn secondary" type="button" onClick={() => openModuleEditor(true)}>New Tracker</button>
       </div>
 
       <div className="metricGrid">
@@ -496,30 +515,42 @@ function DataView({
       {showModuleEditor ? (
         <div className="panel moduleEditor">
           <div className="panelHeader">
-            <h2>{moduleEditorMode === 'edit' ? 'Edit Project' : 'Create Project'}</h2>
-            {moduleEditorMode === 'edit' ? <button className="btn secondary" type="button" onClick={deleteModule}>Delete Project</button> : null}
+            <h2>{moduleEditorMode === 'edit' ? 'Edit Tracker' : 'Create Tracker'}</h2>
+            {moduleEditorMode === 'edit' ? <button className="btn secondary" type="button" onClick={deleteModule}>Delete Tracker</button> : null}
           </div>
           <div className="formPanel">
             <label className="field">
               <span>Key</span>
-              <input value={moduleDraft.key} disabled={moduleEditorMode === 'edit'} onChange={(e) => setModuleDraft((prev) => ({ ...prev, key: e.currentTarget.value }))} placeholder="travel_plans" />
+              <input value={moduleDraft.key} disabled={moduleEditorMode === 'edit'} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setModuleDraft((prev) => ({ ...prev, key: value }));
+              }} placeholder="travel_plans" />
             </label>
             <label className="field">
               <span>Label</span>
-              <input value={moduleDraft.label} onChange={(e) => setModuleDraft((prev) => ({ ...prev, label: e.currentTarget.value }))} placeholder="Travel Plans" />
+              <input value={moduleDraft.label} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setModuleDraft((prev) => ({ ...prev, label: value }));
+              }} placeholder="Travel Plans" />
             </label>
             <label className="field">
               <span>Icon</span>
-              <input value={moduleDraft.icon} onChange={(e) => setModuleDraft((prev) => ({ ...prev, icon: e.currentTarget.value }))} placeholder="✈" />
+              <input value={moduleDraft.icon} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setModuleDraft((prev) => ({ ...prev, icon: value }));
+              }} placeholder="*" />
             </label>
             <label className="field">
               <span>Description</span>
-              <input value={moduleDraft.description} onChange={(e) => setModuleDraft((prev) => ({ ...prev, description: e.currentTarget.value }))} placeholder="Track anything you want" />
+              <input value={moduleDraft.description} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setModuleDraft((prev) => ({ ...prev, description: value }));
+              }} placeholder="Track anything you want" />
             </label>
-            <ProjectFieldBuilder fields={moduleDraft.fields} onAdd={addDraftField} onRemove={removeDraftField} onChange={updateDraftField} />
+            <ModuleFieldBuilder fields={moduleDraft.fields} onAdd={addDraftField} onRemove={removeDraftField} onChange={updateDraftField} />
             <div className="formActions">
               <button className="btn secondary" type="button" onClick={() => setShowModuleEditor(false)}>Cancel</button>
-              <button className="btn primary" type="button" onClick={saveModule}>{moduleEditorMode === 'edit' ? 'Update Project' : 'Create Project'}</button>
+              <button className="btn primary" type="button" onClick={saveModule}>{moduleEditorMode === 'edit' ? 'Update Tracker' : 'Create Tracker'}</button>
             </div>
           </div>
         </div>
@@ -1243,7 +1274,7 @@ function FieldInput({
   );
 }
 
-function ProjectFieldBuilder({
+function ModuleFieldBuilder({
   fields,
   onAdd,
   onRemove,

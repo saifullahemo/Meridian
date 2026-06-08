@@ -20,10 +20,20 @@ from backend.core import router
         ("Analyze spending trends", "analyze"),
         ("Every Monday remind me", "schedule"),
         ("I want to track freelance clients", "create_module"),
+        ("Create a project named Rayhan", "create_project"),
     ],
 )
 def test_detect_action_type(instruction, expected):
     assert router.detect_action_type(instruction) == expected
+
+
+def test_route_project_creation_is_not_module_creation(monkeypatch):
+    monkeypatch.setattr(router, "_load_modules", lambda: {"project_details": {"label": "Project Details", "fields": []}})
+
+    result = router.route("create a project named Rayhan")
+
+    assert result["action"] == "create_project"
+    assert result["module"] is None
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ TOOL_NAMES = {
     "query_knowledge_base": "read_data",
     "get_summary": "summarize",
     "create_module": "create_module",
+    "create_project": "create_project",
 }
 
 TOOL_DESCRIPTIONS = [
@@ -22,6 +23,7 @@ TOOL_DESCRIPTIONS = [
     {"name": "query_knowledge_base", "description": "Answer using uploaded files or RAG sources."},
     {"name": "get_summary", "description": "Summarize or analyze module data."},
     {"name": "create_module", "description": "Create a new module/schema."},
+    {"name": "create_project", "description": "Create a Project workspace for chat, files, memory, and artifacts."},
 ]
 
 

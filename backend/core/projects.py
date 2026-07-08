@@ -4,6 +4,9 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
+import sys
+import tempfile
 import time
 import ast
 from datetime import datetime
@@ -58,6 +61,9 @@ def init_project_tables() -> None:
         )
         _ensure_column(conn, "project_files", "enabled", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(conn, "project_files", "content_text", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "projects", "cover", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "projects", "model_backend", "TEXT NOT NULL DEFAULT 'auto'")
+        _ensure_column(conn, "projects", "coding_model_backend", "TEXT NOT NULL DEFAULT 'auto'")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS project_artifacts (
@@ -71,6 +77,21 @@ def init_project_tables() -> None:
             )
             """
         )
+        _ensure_column(conn, "project_artifacts", "is_final", "INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_artifact_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artifact_id INTEGER NOT NULL,
+                project_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(artifact_id) REFERENCES project_artifacts(id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS project_memory (
@@ -79,6 +100,24 @@ def init_project_tables() -> None:
                 content TEXT NOT NULL,
                 kind TEXT NOT NULL DEFAULT 'note',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_conversation_state (
+                project_id INTEGER PRIMARY KEY,
+                current_goal TEXT NOT NULL DEFAULT '',
+                latest_file_id INTEGER,
+                latest_file_name TEXT NOT NULL DEFAULT '',
+                latest_artifact_id INTEGER,
+                latest_artifact_title TEXT NOT NULL DEFAULT '',
+                latest_action TEXT NOT NULL DEFAULT '',
+                user_preferences TEXT NOT NULL DEFAULT '[]',
+                open_tasks TEXT NOT NULL DEFAULT '[]',
+                summary TEXT NOT NULL DEFAULT '',
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
             )
             """
@@ -112,9 +151,17 @@ def create_project(name: str, description: str = "", instructions: str = "") -> 
     return project
 
 
-def list_projects(include_archived: bool = False) -> list[dict[str, Any]]:
+def list_projects(include_archived: bool = False, search: str = "") -> list[dict[str, Any]]:
     init_project_tables()
-    where = "" if include_archived else "WHERE archived = 0"
+    clauses = []
+    params: list[Any] = []
+    if not include_archived:
+        clauses.append("archived = 0")
+    if search.strip():
+        clauses.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ? OR LOWER(instructions) LIKE ?)")
+        needle = "%" + search.strip().lower() + "%"
+        params.extend([needle, needle, needle])
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     with database.get_connection() as conn:
         rows = conn.execute(
             f"""
@@ -127,7 +174,8 @@ def list_projects(include_archived: bool = False) -> list[dict[str, Any]]:
             {where}
             GROUP BY p.id
             ORDER BY p.updated_at DESC, p.created_at DESC
-            """
+            """,
+            params,
         ).fetchall()
     return [_project_row(row) for row in rows]
 
@@ -151,6 +199,9 @@ def update_project(project_id: int, patch: dict[str, Any]) -> dict[str, Any]:
         "name": lambda v: " ".join(str(v or "").split())[:120],
         "description": lambda v: safeguards.truncate_text(str(v or ""), 2000, "project description"),
         "instructions": lambda v: safeguards.truncate_text(str(v or ""), 4000, "project instructions"),
+        "cover": lambda v: safeguards.truncate_text(str(v or ""), 500, "project cover"),
+        "model_backend": lambda v: _clean_model_backend(str(v or "auto")),
+        "coding_model_backend": lambda v: _clean_model_backend(str(v or "auto")),
         "archived": lambda v: 1 if bool(v) else 0,
     }
     updates = []
@@ -337,7 +388,7 @@ def chat(project_id: int, instruction: str, files: list[Any] | None = None) -> d
     )
     action_result = execute_project_action(project_id, planned)
     if action_result:
-        memory.save_exchange(project_session_id(project_id), text, action_result["message"], action_result["action"])
+        _save_project_exchange(project_id, text, action_result["message"], action_result["action"], action_result.get("meta", {}))
         touch_project(project_id)
         action_result.setdefault("meta", {})["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
         observability.log_event(
@@ -348,14 +399,11 @@ def chat(project_id: int, instruction: str, files: list[Any] | None = None) -> d
             latency_ms=action_result["meta"]["latency_ms"],
         )
         return action_result
-    session_id = project_session_id(project_id)
     context = build_project_context(project, text)
     prompt = prompt_templates.project_chat_prompt(text, context)
     cfg = prompt_templates.config_for("chat")
-    response = brain.ask(prompt, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
+    response = _ask_for_project(project_id, prompt, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
     artifacts = _maybe_create_document_artifact(project_id, text, response)
-    memory.save_exchange(session_id, text, response, "project_chat")
-    touch_project(project_id)
     result = {
         "success": True,
         "message": response,
@@ -370,6 +418,8 @@ def chat(project_id: int, instruction: str, files: list[Any] | None = None) -> d
             "prompt_safety": safety.to_dict(),
         },
     }
+    _save_project_exchange(project_id, text, response, "project_chat", result["meta"])
+    touch_project(project_id)
     result["meta"]["latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
     observability.log_event(
         logger,
@@ -384,6 +434,83 @@ def chat(project_id: int, instruction: str, files: list[Any] | None = None) -> d
 
 def get_history(project_id: int, limit: int = 100) -> list[dict[str, Any]]:
     return memory.get_full_history(project_session_id(project_id))[-limit:]
+
+
+def _save_project_exchange(project_id: int, user_msg: str, ai_msg: str, action: str, meta: dict[str, Any] | None = None) -> None:
+    memory.save_exchange(project_session_id(project_id), user_msg, ai_msg, action)
+    patch = _infer_state_patch(project_id, user_msg, ai_msg, action, meta or {})
+    update_conversation_state(project_id, patch)
+    observability.log_event(logger, "project.conversation_state.update", project_id=project_id, action=action)
+
+
+def get_conversation_state(project_id: int) -> dict[str, Any]:
+    init_project_tables()
+    with database.get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM project_conversation_state WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+    if not row:
+        return _default_conversation_state(project_id)
+    return _conversation_state_row(row)
+
+
+def update_conversation_state(project_id: int, patch: dict[str, Any]) -> dict[str, Any]:
+    current = get_conversation_state(project_id)
+    merged = {**current}
+    for key in [
+        "current_goal",
+        "latest_file_id",
+        "latest_file_name",
+        "latest_artifact_id",
+        "latest_artifact_title",
+        "latest_action",
+        "summary",
+    ]:
+        if key in patch:
+            merged[key] = patch[key]
+    if "user_preferences" in patch:
+        merged["user_preferences"] = _merge_unique_strings(current.get("user_preferences", []), patch.get("user_preferences", []), limit=12)
+    if "open_tasks" in patch:
+        merged["open_tasks"] = _merge_unique_strings(current.get("open_tasks", []), patch.get("open_tasks", []), limit=12)
+    with database.get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO project_conversation_state (
+                project_id, current_goal, latest_file_id, latest_file_name,
+                latest_artifact_id, latest_artifact_title, latest_action,
+                user_preferences, open_tasks, summary, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                current_goal = excluded.current_goal,
+                latest_file_id = excluded.latest_file_id,
+                latest_file_name = excluded.latest_file_name,
+                latest_artifact_id = excluded.latest_artifact_id,
+                latest_artifact_title = excluded.latest_artifact_title,
+                latest_action = excluded.latest_action,
+                user_preferences = excluded.user_preferences,
+                open_tasks = excluded.open_tasks,
+                summary = excluded.summary,
+                updated_at = excluded.updated_at
+            """,
+            (
+                project_id,
+                str(merged.get("current_goal") or "")[:500],
+                merged.get("latest_file_id"),
+                str(merged.get("latest_file_name") or "")[:240],
+                merged.get("latest_artifact_id"),
+                str(merged.get("latest_artifact_title") or "")[:240],
+                str(merged.get("latest_action") or "")[:80],
+                json.dumps(merged.get("user_preferences", [])),
+                json.dumps(merged.get("open_tasks", [])),
+                str(merged.get("summary") or "")[:2000],
+                datetime.now().isoformat(),
+            ),
+        )
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (datetime.now().isoformat(), project_id))
+        conn.commit()
+    return get_conversation_state(project_id)
 
 
 def touch_project(project_id: int) -> None:
@@ -415,7 +542,7 @@ def query_project(project_id: int, query: str, top_k: int = 5, answer: bool = Tr
         }
     prompt = prompt_templates.rag_answer_prompt(query, sources)
     cfg = prompt_templates.config_for("rag_answer")
-    response = brain.ask(prompt, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
+    response = _ask_for_project(project_id, prompt, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
     observability.log_event(logger, "project.rag.answer", project_id=project_id, hits=len(sources))
     return {"success": True, "message": response, "sources": sources}
 
@@ -429,6 +556,12 @@ def build_project_context(project: dict[str, Any], instruction: str) -> str:
         lines.append("Description: " + project["description"])
     if project.get("instructions"):
         lines.append("Project instructions: " + project["instructions"])
+
+    state_lines = _conversation_state_lines(get_conversation_state(project["id"]))
+    if state_lines:
+        lines.append("")
+        lines.append("Conversation state:")
+        lines.extend(state_lines)
 
     project_memories = list_memory(project["id"])
     if project_memories:
@@ -492,7 +625,135 @@ def list_artifacts(project_id: int) -> list[dict[str, Any]]:
             """,
             (project_id,),
         ).fetchall()
+    return [_artifact_row(row) for row in rows]
+
+
+def check_artifact(project_id: int, artifact_id: int) -> dict[str, Any]:
+    artifact = get_project_artifact(project_id, artifact_id)
+    source_file = _source_file_for_artifact(project_id, artifact)
+    source_content = get_file_content(project_id, source_file["id"]) if source_file else ""
+    quality = _validate_generated_code(artifact.get("content", ""), source_content, artifact.get("title", ""))
+    return {
+        "artifact": artifact,
+        "code_quality": quality,
+        "message": _code_quality_explanation(quality, artifact, source_file),
+        "source_file": source_file,
+    }
+
+
+def update_artifact(project_id: int, artifact_id: int, patch: dict[str, Any]) -> dict[str, Any]:
+    current = get_project_artifact(project_id, artifact_id)
+    updates = []
+    values: list[Any] = []
+    if "title" in patch:
+        title = " ".join(str(patch.get("title") or "").split())[:160]
+        if not title:
+            raise ValueError("Artifact title is required.")
+        updates.append("title = ?")
+        values.append(title)
+    if "type" in patch:
+        updates.append("type = ?")
+        values.append(str(patch.get("type") or "document")[:40])
+    if "content" in patch:
+        _save_artifact_version(project_id, artifact_id, current.get("content", ""), str(patch.get("note") or "Edited artifact"))
+        updates.append("content = ?")
+        values.append(str(patch.get("content") or ""))
+    if "is_final" in patch:
+        updates.append("is_final = ?")
+        values.append(1 if bool(patch.get("is_final")) else 0)
+    if not updates:
+        return current
+    values.extend([artifact_id, project_id])
+    with database.get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE project_artifacts SET " + ", ".join(updates) + " WHERE id = ? AND project_id = ?",
+            values,
+        )
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (datetime.now().isoformat(), project_id))
+        conn.commit()
+    if cursor.rowcount == 0:
+        raise ValueError("Artifact not found.")
+    updated = get_project_artifact(project_id, artifact_id)
+    observability.log_event(logger, "project.artifact.update", project_id=project_id, artifact_id=artifact_id)
+    return updated
+
+
+def list_artifact_versions(project_id: int, artifact_id: int) -> list[dict[str, Any]]:
+    get_project_artifact(project_id, artifact_id)
+    with database.get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM project_artifact_versions
+            WHERE project_id = ? AND artifact_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (project_id, artifact_id),
+        ).fetchall()
     return [dict(row) for row in rows]
+
+
+def repair_artifact(project_id: int, artifact_id: int, instruction: str = "repair this artifact") -> dict[str, Any]:
+    artifact = get_project_artifact(project_id, artifact_id)
+    if artifact.get("type") != "code":
+        raise ValueError("Only code artifacts can be repaired automatically.")
+    repaired, quality, source_file = _repair_code_artifact(project_id, artifact, instruction)
+    updated = update_artifact(project_id, artifact_id, {"content": repaired, "note": "Automatic repair"})
+    return {"artifact": updated, "code_quality": quality, "source_file": source_file}
+
+
+def run_artifact(project_id: int, artifact_id: int, timeout_seconds: int = 20) -> dict[str, Any]:
+    artifact = get_project_artifact(project_id, artifact_id)
+    if artifact.get("type") != "code":
+        raise ValueError("Only code artifacts can be run.")
+    code = _extract_python_code(artifact.get("content", ""))
+    if not code.strip():
+        raise ValueError("No runnable Python code found in this artifact.")
+    timeout = max(1, min(int(timeout_seconds or 20), 60))
+    with tempfile.TemporaryDirectory(prefix="personal-os-artifact-") as tmp:
+        script_path = os.path.join(tmp, "artifact.py")
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write(code)
+        started = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-I", script_path],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                env={"PYTHONNOUSERSITE": "1"},
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "success": False,
+                "returncode": None,
+                "stdout": safeguards.truncate_text(exc.stdout or "", 12000, "artifact stdout"),
+                "stderr": "Execution timed out after " + str(timeout) + " seconds.",
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
+    return {
+        "success": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "stdout": safeguards.truncate_text(completed.stdout or "", 12000, "artifact stdout"),
+        "stderr": safeguards.truncate_text(completed.stderr or "", 12000, "artifact stderr"),
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+    }
+
+
+def delete_artifact(project_id: int, artifact_id: int) -> None:
+    init_project_tables()
+    get_project(project_id)
+    with database.get_connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM project_artifacts WHERE id = ? AND project_id = ?",
+            (artifact_id, project_id),
+        )
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (datetime.now().isoformat(), project_id))
+        conn.commit()
+    if cursor.rowcount == 0:
+        raise ValueError("Artifact not found.")
+    observability.log_event(logger, "project.artifact.delete", project_id=project_id, artifact_id=artifact_id)
 
 
 def list_memory(project_id: int) -> list[dict[str, Any]]:
@@ -523,7 +784,7 @@ def add_memory(project_id: int, content: str, kind: str = "note") -> dict[str, A
         conn.commit()
         row = conn.execute("SELECT * FROM project_memory WHERE id = ?", (cursor.lastrowid,)).fetchone()
     observability.log_event(logger, "project.memory.create", project_id=project_id, kind=kind[:40] or "note")
-    return dict(row)
+    return _artifact_row(row)
 
 
 def delete_memory(project_id: int, memory_id: int) -> None:
@@ -538,6 +799,30 @@ def delete_memory(project_id: int, memory_id: int) -> None:
     if cursor.rowcount == 0:
         raise ValueError("Project memory not found.")
     observability.log_event(logger, "project.memory.delete", project_id=project_id, memory_id=memory_id)
+
+
+def update_memory(project_id: int, memory_id: int, content: str, kind: str | None = None) -> dict[str, Any]:
+    clean = safeguards.truncate_text(" ".join((content or "").split()), 1200, "project memory")
+    if not clean:
+        raise ValueError("Memory content is required.")
+    updates = ["content = ?"]
+    values: list[Any] = [clean]
+    if kind is not None:
+        updates.append("kind = ?")
+        values.append(str(kind or "note")[:40])
+    values.extend([memory_id, project_id])
+    with database.get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE project_memory SET " + ", ".join(updates) + " WHERE id = ? AND project_id = ?",
+            values,
+        )
+        conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (datetime.now().isoformat(), project_id))
+        conn.commit()
+        row = conn.execute("SELECT * FROM project_memory WHERE id = ? AND project_id = ?", (memory_id, project_id)).fetchone()
+    if cursor.rowcount == 0 or not row:
+        raise ValueError("Project memory not found.")
+    observability.log_event(logger, "project.memory.update", project_id=project_id, memory_id=memory_id)
+    return dict(row)
 
 
 def plan_project_action(project: dict[str, Any], instruction: str) -> dict[str, Any]:
@@ -639,13 +924,14 @@ def execute_project_action(project_id: int, plan: dict[str, Any]) -> dict[str, A
             )
         prompt = _file_rewrite_prompt(file_info["filename"], content, plan.get("request", "Rewrite this uploaded file."))
         cfg = prompt_templates.config_for("analyze")
-        response = _ask_complete_code_rewrite(prompt, cfg["temperature"])
+        response = _ask_complete_code_rewrite(prompt, cfg["temperature"], _preferred_backend(project_id, coding=True))
         response, quality = _repair_code_rewrite_if_needed(
             file_info["filename"],
             content,
             plan.get("request", "Rewrite this uploaded file."),
             response,
             cfg["temperature"],
+            _preferred_backend(project_id, coding=True),
         )
         artifact = _create_project_artifact(
             project_id,
@@ -676,7 +962,7 @@ def execute_project_action(project_id: int, plan: dict[str, Any]) -> dict[str, A
             )
         prompt = _file_review_prompt(file_info["filename"], content, plan.get("request", "Review this uploaded file."))
         cfg = prompt_templates.config_for("analyze")
-        response = brain.ask(prompt, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
+        response = _ask_for_project(project_id, prompt, temperature=cfg["temperature"], max_tokens=cfg["max_tokens"], coding=True)
         return _action_response(
             response,
             "project_file_review",
@@ -730,6 +1016,58 @@ def get_file_content(project_id: int, file_id: int) -> str:
     if not row:
         raise ValueError("Project file not found.")
     return row["content_text"] or ""
+
+
+def get_file_detail(project_id: int, file_id: int) -> dict[str, Any]:
+    file_info = get_file(file_id)
+    content = get_file_content(project_id, file_id)
+    if int(file_info.get("project_id", project_id)) != int(project_id):
+        raise ValueError("Project file not found.")
+    chunks = []
+    words = content.split()
+    chunk_size = 180
+    for index in range(0, len(words), chunk_size):
+        text = " ".join(words[index:index + chunk_size])
+        if text:
+            chunks.append({"index": len(chunks) + 1, "text": text})
+        if len(chunks) >= 30:
+            break
+    return {
+        "file": file_info,
+        "text": safeguards.truncate_text(content, 30000, "project file text"),
+        "preview": safeguards.truncate_text(content, 5000, "project file preview"),
+        "chunks": chunks,
+    }
+
+
+def _preferred_backend(project_id: int, coding: bool = False) -> str | None:
+    if not project_id:
+        return None
+    try:
+        project = get_project(project_id)
+    except Exception:
+        return None
+    key = "coding_model_backend" if coding else "model_backend"
+    value = _clean_model_backend(str(project.get(key) or "auto"))
+    return None if value == "auto" else value
+
+
+def _ask_for_project(
+    project_id: int,
+    prompt: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+    coding: bool = False,
+    max_output_chars: int | None = None,
+) -> str:
+    return brain.ask(
+        prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        max_output_chars=max_output_chars,
+        preferred_backend=_preferred_backend(project_id, coding=coding),
+    )
 
 
 def _is_file_review_request(text: str) -> bool:
@@ -790,7 +1128,10 @@ def _is_repair_code_artifact_request(text: str) -> bool:
 
 def _is_continue_code_artifact_request(text: str) -> bool:
     lower = text.lower()
-    return "continue" in lower and any(term in lower for term in ["code", "last line", "where it stopped", "from the last"])
+    return "continue" in lower and (
+        any(term in lower for term in ["code", "last line", "where it stopped", "from the last"])
+        or lower.strip() in {"continue", "continue it", "continue this", "continue please"}
+    )
 
 
 def _latest_code_artifact(project_id: int) -> dict[str, Any] | None:
@@ -816,6 +1157,18 @@ def _find_referenced_file(project_id: int, text: str) -> dict[str, Any] | None:
 
     if len(candidates) == 1 and any(word in lower for word in ["file", "code", "notebook", "uploaded"]):
         return candidates[0]
+    if any(word in lower for word in ["this file", "that file", "previous file", "last file", "uploaded file", "uploaded code", "previous notebook", "that notebook"]):
+        state = get_conversation_state(project_id)
+        latest_id = state.get("latest_file_id")
+        if latest_id:
+            for file in candidates:
+                if int(file.get("id")) == int(latest_id):
+                    return file
+        latest_name = str(state.get("latest_file_name") or "").lower()
+        if latest_name:
+            for file in candidates:
+                if file["filename"].lower() == latest_name:
+                    return file
     return None
 
 
@@ -867,12 +1220,13 @@ def _file_rewrite_prompt(filename: str, content: str, request: str) -> str:
     )
 
 
-def _ask_complete_code_rewrite(prompt: str, temperature: float) -> str:
+def _ask_complete_code_rewrite(prompt: str, temperature: float, preferred_backend: str | None = None) -> str:
     response = brain.ask(
         prompt,
         temperature=temperature,
         max_tokens=CODE_REWRITE_MAX_TOKENS,
         max_output_chars=CODE_REWRITE_MAX_TOKENS * 5,
+        preferred_backend=preferred_backend,
     )
     for _ in range(max(0, CODE_REWRITE_CONTINUATIONS)):
         if not _looks_truncated_code_response(response):
@@ -883,6 +1237,7 @@ def _ask_complete_code_rewrite(prompt: str, temperature: float) -> str:
             temperature=temperature,
             max_tokens=CODE_REWRITE_CONTINUATION_TOKENS,
             max_output_chars=CODE_REWRITE_CONTINUATION_TOKENS * 5,
+            preferred_backend=preferred_backend,
         )
         response = _merge_code_continuation(response, continuation)
     if _looks_truncated_code_response(response):
@@ -899,6 +1254,7 @@ def _repair_code_rewrite_if_needed(
     request: str,
     response: str,
     temperature: float,
+    preferred_backend: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     current = response
     quality = _validate_generated_code(current, source_content, request)
@@ -911,6 +1267,7 @@ def _repair_code_rewrite_if_needed(
             temperature=temperature,
             max_tokens=CODE_REWRITE_MAX_TOKENS,
             max_output_chars=CODE_REWRITE_MAX_TOKENS * 5,
+            preferred_backend=preferred_backend,
         )
         for _ in range(max(0, CODE_REWRITE_CONTINUATIONS)):
             if not _looks_truncated_code_response(current):
@@ -920,6 +1277,7 @@ def _repair_code_rewrite_if_needed(
                 temperature=temperature,
                 max_tokens=CODE_REWRITE_CONTINUATION_TOKENS,
                 max_output_chars=CODE_REWRITE_CONTINUATION_TOKENS * 5,
+                preferred_backend=preferred_backend,
             )
             current = _merge_code_continuation(current, continuation)
         quality = _validate_generated_code(current, source_content, request)
@@ -1102,6 +1460,7 @@ def _merge_code_continuation(response: str, continuation: str) -> str:
 
 def _continue_code_artifact(artifact: dict[str, Any], request: str) -> str:
     content = artifact.get("content", "")
+    project_id = int(artifact.get("project_id") or 0)
     prompt = "\n\n".join(
         [
             "Continue the latest project code artifact from exactly where it stopped.",
@@ -1117,6 +1476,7 @@ def _continue_code_artifact(artifact: dict[str, Any], request: str) -> str:
         temperature=0.2,
         max_tokens=CODE_REWRITE_CONTINUATION_TOKENS,
         max_output_chars=CODE_REWRITE_CONTINUATION_TOKENS * 5,
+        preferred_backend=_preferred_backend(project_id, coding=True) if project_id else None,
     )
     return _strip_code_restart(_clean_continuation(continuation))
 
@@ -1153,6 +1513,8 @@ def _strip_code_restart(continuation: str) -> str:
 
 
 def _append_project_artifact_content(project_id: int, artifact_id: int, continuation: str) -> dict[str, Any]:
+    current = get_project_artifact(project_id, artifact_id)
+    _save_artifact_version(project_id, artifact_id, current.get("content", ""), "Continued artifact content")
     with database.get_connection() as conn:
         row = conn.execute(
             "SELECT content FROM project_artifacts WHERE id = ? AND project_id = ?",
@@ -1191,6 +1553,7 @@ def _repair_code_artifact(
         request + "\nRepair the latest generated code artifact.",
         current,
         0.2,
+        _preferred_backend(project_id, coding=True),
     )
     return repaired, quality, source_file
 
@@ -1210,6 +1573,8 @@ def _source_file_for_artifact(project_id: int, artifact: dict[str, Any]) -> dict
 
 
 def _replace_project_artifact_content(project_id: int, artifact_id: int, content: str) -> dict[str, Any]:
+    current = get_project_artifact(project_id, artifact_id)
+    _save_artifact_version(project_id, artifact_id, current.get("content", ""), "Replaced artifact content")
     with database.get_connection() as conn:
         cursor = conn.execute(
             "UPDATE project_artifacts SET content = ? WHERE id = ? AND project_id = ?",
@@ -1220,6 +1585,20 @@ def _replace_project_artifact_content(project_id: int, artifact_id: int, content
     if cursor.rowcount == 0:
         raise ValueError("Artifact not found.")
     return get_artifact(artifact_id)
+
+
+def _save_artifact_version(project_id: int, artifact_id: int, content: str, note: str = "") -> None:
+    if not content:
+        return
+    with database.get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO project_artifact_versions (artifact_id, project_id, content, note)
+            VALUES (?, ?, ?, ?)
+            """,
+            (artifact_id, project_id, content, safeguards.truncate_text(note or "", 300, "artifact version note")),
+        )
+        conn.commit()
 
 
 def _create_project_artifact(project_id: int, title: str, artifact_type: str, content: str) -> dict[str, Any]:
@@ -1259,7 +1638,20 @@ def get_artifact(artifact_id: int) -> dict[str, Any]:
         row = conn.execute("SELECT * FROM project_artifacts WHERE id = ?", (artifact_id,)).fetchone()
     if not row:
         raise ValueError("Artifact not found.")
-    return dict(row)
+    return _artifact_row(row)
+
+
+def get_project_artifact(project_id: int, artifact_id: int) -> dict[str, Any]:
+    init_project_tables()
+    get_project(project_id)
+    with database.get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM project_artifacts WHERE id = ? AND project_id = ?",
+            (artifact_id, project_id),
+        ).fetchone()
+    if not row:
+        raise ValueError("Artifact not found.")
+    return _artifact_row(row)
 
 
 def _artifact_title(instruction: str) -> str:
@@ -1306,6 +1698,137 @@ def _file_row(row: sqlite3.Row) -> dict[str, Any]:
     data["warnings"] = _json_loads(data.get("warnings"), [])
     data["metadata"] = _json_loads(data.get("metadata"), {})
     return data
+
+
+def _artifact_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["is_final"] = bool(data.get("is_final", 0))
+    return data
+
+
+def _default_conversation_state(project_id: int) -> dict[str, Any]:
+    return {
+        "project_id": project_id,
+        "current_goal": "",
+        "latest_file_id": None,
+        "latest_file_name": "",
+        "latest_artifact_id": None,
+        "latest_artifact_title": "",
+        "latest_action": "",
+        "user_preferences": [],
+        "open_tasks": [],
+        "summary": "",
+        "updated_at": "",
+    }
+
+
+def _conversation_state_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["user_preferences"] = _json_loads(data.get("user_preferences"), [])
+    data["open_tasks"] = _json_loads(data.get("open_tasks"), [])
+    return data
+
+
+def _merge_unique_strings(existing: list[Any], incoming: list[Any], limit: int = 12) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in [*existing, *incoming]:
+        clean = " ".join(str(value or "").split())
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(clean[:240])
+    return merged[-limit:]
+
+
+def _conversation_state_lines(state: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    if state.get("current_goal"):
+        lines.append("Current goal: " + str(state["current_goal"]))
+    if state.get("latest_file_name"):
+        lines.append("Latest referenced file: " + str(state["latest_file_name"]))
+    if state.get("latest_artifact_title"):
+        lines.append("Latest generated artifact: " + str(state["latest_artifact_title"]))
+    if state.get("latest_action"):
+        lines.append("Latest action: " + str(state["latest_action"]))
+    if state.get("user_preferences"):
+        lines.append("User preferences:")
+        for item in state.get("user_preferences", [])[:8]:
+            lines.append("- " + str(item))
+    if state.get("open_tasks"):
+        lines.append("Open tasks:")
+        for item in state.get("open_tasks", [])[:8]:
+            lines.append("- " + str(item))
+    if state.get("summary"):
+        lines.append("Conversation summary: " + str(state["summary"]))
+    return lines
+
+
+def _infer_state_patch(project_id: int, instruction: str, response: str, action: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    meta = meta or {}
+    lower = instruction.lower()
+    patch: dict[str, Any] = {"latest_action": action}
+    preferences: list[str] = []
+    tasks: list[str] = []
+
+    if any(term in lower for term in ["complete code", "runnable code", "do not use placeholders", "no placeholders"]):
+        preferences.append("When generating code, provide complete runnable code and avoid placeholders.")
+    if any(term in lower for term in ["simple", "simplify", "don't understand", "dont understand", "i dont understand"]):
+        preferences.append("Explain concepts in simple plain language before technical details.")
+    if "random forest" in lower:
+        patch["current_goal"] = "Work on a Random Forest version of the uploaded code."
+    elif "cnn" in lower:
+        patch["current_goal"] = "Work on CNN/model code and explain changes clearly."
+    elif "review" in lower or "check" in lower:
+        tasks.append("Review the referenced project file or generated artifact.")
+    elif "rewrite" in lower or "convert" in lower:
+        tasks.append("Rewrite or convert the referenced project code.")
+
+    uploaded_files = meta.get("uploaded_files") or []
+    if uploaded_files:
+        latest_file = uploaded_files[-1]
+        patch["latest_file_id"] = latest_file.get("id")
+        patch["latest_file_name"] = latest_file.get("filename", "")
+
+    file_info = meta.get("file") or {}
+    if file_info:
+        patch["latest_file_id"] = file_info.get("id")
+        patch["latest_file_name"] = file_info.get("filename", "")
+
+    artifacts = meta.get("artifacts") or []
+    if artifacts:
+        latest_artifact = artifacts[-1]
+        patch["latest_artifact_id"] = latest_artifact.get("id")
+        patch["latest_artifact_title"] = latest_artifact.get("title", "")
+        if latest_artifact.get("type") == "code":
+            tasks.append("Check whether the latest generated code artifact is complete and runnable.")
+
+    if response:
+        patch["summary"] = _conversation_summary(project_id, instruction, response, action)
+    if preferences:
+        patch["user_preferences"] = preferences
+    if tasks:
+        patch["open_tasks"] = tasks
+    return patch
+
+
+def _conversation_summary(project_id: int, instruction: str, response: str, action: str) -> str:
+    current = get_conversation_state(project_id)
+    parts = []
+    if current.get("summary"):
+        parts.append(str(current["summary"]))
+    parts.append("Last user asked: " + safeguards.truncate_text(" ".join(instruction.split()), 260, "conversation state instruction"))
+    parts.append("Assistant action: " + action)
+    parts.append("Assistant answered: " + safeguards.truncate_text(" ".join(response.split()), 360, "conversation state response"))
+    return safeguards.truncate_text(" ".join(parts), 1600, "conversation state summary")
+
+
+def _clean_model_backend(value: str) -> str:
+    clean = (value or "auto").strip().lower()
+    return clean if clean in {"auto", "groq", "ollama", "openrouter", "gemini"} else "auto"
 
 
 def _enabled_sources(project_id: int) -> list[str]:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.agents import universal_agent
@@ -405,12 +407,19 @@ def module_records(
     module_key: str,
     search: str = "",
     status: str = "",
+    sort_by: str = "",
+    sort_dir: str = "desc",
     limit: int = Query(default=500, ge=1, le=1000),
     _authorized: bool = Depends(require_api_key),
 ):
     schema = _require_module(module_key)
     database.init_all_tables()
-    records = database.select(module_key, limit=limit)
+    columns = set(database.get_table_columns(module_key))
+    order_by = "created_at DESC"
+    if sort_by and sort_by in columns:
+        direction = "ASC" if sort_dir.lower() == "asc" else "DESC"
+        order_by = sort_by + " " + direction
+    records = database.select(module_key, limit=limit, order_by=order_by)
 
     if search:
         needle = search.lower()
@@ -430,6 +439,45 @@ def module_records(
         "total": database.count(module_key),
         "showing": len(records),
     }
+
+
+@router.get("/modules/{module_key}/records/export")
+def export_module_records(module_key: str, _authorized: bool = Depends(require_api_key)):
+    schema = _require_module(module_key)
+    database.init_all_tables()
+    records = database.select(module_key, limit=10000)
+    fields = ["id", *[field["name"] for field in schema.get("fields", [])], "created_at", "updated_at"]
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for record in records:
+        writer.writerow(record)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{module_key}.csv"'},
+    )
+
+
+@router.post("/modules/{module_key}/records/import")
+async def import_module_records(
+    module_key: str,
+    file: UploadFile = File(...),
+    _authorized: bool = Depends(require_api_key),
+):
+    schema = _require_module(module_key)
+    database.init_all_tables()
+    raw = await file.read()
+    text = raw.decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(text))
+    allowed = {field["name"] for field in schema.get("fields", [])}
+    imported = 0
+    for row in reader:
+        data = {key: value for key, value in row.items() if key in allowed and value not in {None, ""}}
+        if data:
+            database.insert(module_key, data)
+            imported += 1
+    return {"success": True, "imported": imported}
 
 
 def _clean_module_key(key: str) -> str:

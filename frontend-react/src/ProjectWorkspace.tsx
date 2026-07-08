@@ -6,6 +6,10 @@ type Project = {
   name: string;
   description?: string;
   instructions?: string;
+  cover?: string;
+  model_backend?: string;
+  coding_model_backend?: string;
+  archived?: boolean;
   file_count?: number;
   artifact_count?: number;
   files?: ProjectFile[];
@@ -37,7 +41,36 @@ type ProjectArtifact = {
   title: string;
   type: string;
   content: string;
+  is_final?: boolean;
   created_at?: string;
+};
+
+type ConversationState = {
+  current_goal?: string;
+  latest_file_name?: string;
+  latest_artifact_title?: string;
+  latest_action?: string;
+  user_preferences?: string[];
+  open_tasks?: string[];
+  summary?: string;
+  updated_at?: string;
+};
+
+type ModelStatus = {
+  ai?: {
+    ready?: boolean;
+    active_backend?: string;
+    model?: string;
+    configured_backend?: string;
+  };
+  vector_store?: {
+    provider?: string;
+    enabled?: boolean;
+  };
+  embeddings?: {
+    provider?: string;
+    ready?: boolean;
+  };
 };
 
 type SourceHit = {
@@ -72,15 +105,25 @@ export default function ProjectWorkspace({
   const projectList = Array.isArray(projects) ? projects : [];
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState({ name: '', description: '', instructions: '' });
+  const [draft, setDraft] = useState({ name: '', description: '', instructions: '', cover: '', model_backend: 'auto', coding_model_backend: 'auto' });
   const [editingSettings, setEditingSettings] = useState(false);
-  const [sideTab, setSideTab] = useState<'files' | 'memory' | 'sources' | 'artifacts'>('files');
+  const [sideTab, setSideTab] = useState<'files' | 'memory' | 'sources' | 'artifacts' | 'continuity'>('files');
   const [instruction, setInstruction] = useState('');
   const [memoryDraft, setMemoryDraft] = useState('');
+  const [editingMemoryId, setEditingMemoryId] = useState<number | null>(null);
   const [sourceQuery, setSourceQuery] = useState('');
   const [sourceAnswer, setSourceAnswer] = useState('');
   const [sourceResults, setSourceResults] = useState<SourceHit[]>([]);
   const [files, setFiles] = useState<File[]>([]);
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
+  const [artifactNotice, setArtifactNotice] = useState<string | null>(null);
+  const [artifactDrafts, setArtifactDrafts] = useState<Record<number, { title: string; content: string }>>({});
+  const [artifactVersions, setArtifactVersions] = useState<Record<number, any[]>>({});
+  const [artifactRuns, setArtifactRuns] = useState<Record<number, any>>({});
+  const [fileDetail, setFileDetail] = useState<any | null>(null);
+  const [lastUserInstruction, setLastUserInstruction] = useState('');
+  const [conversationState, setConversationState] = useState<ConversationState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -95,11 +138,16 @@ export default function ProjectWorkspace({
     }
     const detail = await readJson<{ project: Project }>(await fetch(api(`/api/projects/${activeProjectId}`)));
     const history = await readJson<{ history: any[] }>(await fetch(api(`/api/projects/${activeProjectId}/history`)));
+    const state = await readJson<{ state: ConversationState }>(await fetch(api(`/api/projects/${activeProjectId}/conversation-state`)));
     setProject(detail.project);
+    setConversationState(state.state || null);
     setDraft({
       name: detail.project.name || '',
       description: detail.project.description || '',
       instructions: detail.project.instructions || '',
+      cover: detail.project.cover || '',
+      model_backend: detail.project.model_backend || 'auto',
+      coding_model_backend: detail.project.coding_model_backend || 'auto',
     });
     setMessages((history.history || []).map((item: any) => ({
       role: item.role === 'user' ? 'user' : item.role === 'system' ? 'system' : 'assistant',
@@ -112,6 +160,13 @@ export default function ProjectWorkspace({
   useEffect(() => {
     loadProject().catch((e) => setError(String(e.message || e)));
   }, [loadProject]);
+
+  useEffect(() => {
+    fetch(api('/api/status'))
+      .then((res) => readJson<ModelStatus>(res))
+      .then((json) => setModelStatus(json))
+      .catch(() => setModelStatus(null));
+  }, [api]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -180,6 +235,29 @@ export default function ProjectWorkspace({
     }
   }
 
+  async function archiveProject() {
+    if (!project) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await readJson(
+        await fetch(api(`/api/projects/${project.id}`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ archived: true }),
+        }),
+      );
+      setActiveProjectId(null);
+      setProject(null);
+      setMessages([]);
+      await onChanged();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function uploadFilesOnly() {
     if (!project || !files.length) return;
     setLoading(true);
@@ -201,6 +279,7 @@ export default function ProjectWorkspace({
   async function sendMessage() {
     if (!project || !instruction.trim()) return;
     const text = instruction.trim();
+    setLastUserInstruction(text);
     const userMessage: ChatMessage = { role: 'user', content: text };
     setMessages((prev) => [...prev, userMessage]);
     setInstruction('');
@@ -235,6 +314,23 @@ export default function ProjectWorkspace({
     } finally {
       setLoading(false);
     }
+  }
+
+  async function retryLastMessage() {
+    if (!lastUserInstruction) return;
+    setInstruction(lastUserInstruction);
+    window.setTimeout(() => {
+      const textarea = document.querySelector<HTMLTextAreaElement>('.composer textarea');
+      textarea?.focus();
+    }, 0);
+  }
+
+  function continueGeneration() {
+    setInstruction('continue the code from the last line');
+    window.setTimeout(() => {
+      const textarea = document.querySelector<HTMLTextAreaElement>('.composer textarea');
+      textarea?.focus();
+    }, 0);
   }
 
   async function removeFile(fileId: number) {
@@ -272,19 +368,53 @@ export default function ProjectWorkspace({
     }
   }
 
+  async function useOnlyFile(file: ProjectFile) {
+    if (!project) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await Promise.all((project.files || []).map((item) => fetch(api(`/api/projects/${project.id}/files/${item.id}`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: item.id === file.id }),
+      })));
+      await loadProject();
+      setInstruction(`Only use ${file.filename}: `);
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function showFileDetail(file: ProjectFile) {
+    if (!project) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const json = await readJson<any>(await fetch(api(`/api/projects/${project.id}/files/${file.id}`)));
+      setFileDetail(json);
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function addMemory() {
     if (!project || !memoryDraft.trim()) return;
     setLoading(true);
     setError(null);
     try {
       await readJson(
-        await fetch(api(`/api/projects/${project.id}/memory`), {
-          method: 'POST',
+        await fetch(api(editingMemoryId ? `/api/projects/${project.id}/memory/${editingMemoryId}` : `/api/projects/${project.id}/memory`), {
+          method: editingMemoryId ? 'PUT' : 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: memoryDraft.trim(), kind: 'note' }),
         }),
       );
       setMemoryDraft('');
+      setEditingMemoryId(null);
       await loadProject();
       await onChanged();
     } catch (e: any) {
@@ -306,6 +436,11 @@ export default function ProjectWorkspace({
     } finally {
       setLoading(false);
     }
+  }
+
+  function editMemory(item: ProjectMemory) {
+    setEditingMemoryId(item.id);
+    setMemoryDraft(item.content);
   }
 
   async function searchSources() {
@@ -331,11 +466,180 @@ export default function ProjectWorkspace({
     }
   }
 
+  async function checkArtifact(artifact: ProjectArtifact) {
+    if (!project) return;
+    setLoading(true);
+    setError(null);
+    setArtifactNotice(null);
+    try {
+      const json = await readJson<any>(
+        await fetch(api(`/api/projects/${project.id}/artifacts/${artifact.id}/check`)),
+      );
+      setArtifactNotice(String(json.message || 'Artifact checked.'));
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveArtifact(artifact: ProjectArtifact) {
+    if (!project) return;
+    const draft = artifactDrafts[artifact.id] || { title: artifact.title, content: artifact.content };
+    setLoading(true);
+    setError(null);
+    try {
+      const json = await readJson<any>(
+        await fetch(api(`/api/projects/${project.id}/artifacts/${artifact.id}`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: draft.title, content: draft.content, note: 'Edited in project workspace' }),
+        }),
+      );
+      setArtifactNotice('Artifact saved. Previous content is in version history.');
+      setArtifactDrafts((prev) => ({ ...prev, [artifact.id]: { title: json.artifact.title, content: json.artifact.content } }));
+      await loadProject();
+      await onChanged();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function markArtifactFinal(artifact: ProjectArtifact) {
+    if (!project) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await readJson(
+        await fetch(api(`/api/projects/${project.id}/artifacts/${artifact.id}`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_final: !artifact.is_final }),
+        }),
+      );
+      await loadProject();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadArtifactVersions(artifact: ProjectArtifact) {
+    if (!project) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const json = await readJson<any>(await fetch(api(`/api/projects/${project.id}/artifacts/${artifact.id}/versions`)));
+      setArtifactVersions((prev) => ({ ...prev, [artifact.id]: json.versions || [] }));
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function repairArtifact(artifact: ProjectArtifact) {
+    if (!project) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const json = await readJson<any>(
+        await fetch(api(`/api/projects/${project.id}/artifacts/${artifact.id}/repair`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instruction: 'Repair this generated code so it is complete and runnable.' }),
+        }),
+      );
+      setArtifactNotice(json.code_quality?.ok ? 'Artifact repaired.' : 'Artifact repaired, but still has warnings.');
+      setArtifactDrafts((prev) => ({ ...prev, [artifact.id]: { title: json.artifact.title, content: json.artifact.content } }));
+      await loadProject();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runArtifact(artifact: ProjectArtifact) {
+    if (!project) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const json = await readJson<any>(
+        await fetch(api(`/api/projects/${project.id}/artifacts/${artifact.id}/run`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ timeout_seconds: 20 }),
+        }),
+      );
+      setArtifactRuns((prev) => ({ ...prev, [artifact.id]: json.run }));
+      setArtifactNotice(json.run?.success ? 'Code ran successfully.' : 'Code ran with errors. See output below.');
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteArtifact(artifact: ProjectArtifact) {
+    if (!project) return;
+    if (!window.confirm(`Delete artifact "${artifact.title}"?`)) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await readJson(await fetch(api(`/api/projects/${project.id}/artifacts/${artifact.id}`), { method: 'DELETE' }));
+      setArtifactNotice('Artifact deleted.');
+      await loadProject();
+      await onChanged();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function copyArtifact(artifact: ProjectArtifact) {
+    try {
+      await navigator.clipboard.writeText(artifact.content || '');
+      setArtifactNotice('Artifact copied to clipboard.');
+    } catch {
+      setArtifactNotice('Copy failed. Select the artifact text and copy it manually.');
+    }
+  }
+
+  function downloadArtifact(artifact: ProjectArtifact) {
+    const extension = artifact.type === 'code' ? 'py' : 'md';
+    const safeTitle = (artifact.title || 'artifact').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'artifact';
+    const blob = new Blob([artifact.content || ''], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = safeTitle.endsWith(`.${extension}`) ? safeTitle : `${safeTitle}.${extension}`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
   function clearFiles() {
     setFiles([]);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (projectFileInputRef.current) projectFileInputRef.current.value = '';
   }
+
+  function addDroppedFiles(fileList: FileList | null) {
+    if (!fileList) return;
+    setFiles((prev) => [...prev, ...Array.from(fileList)]);
+  }
+
+  const enabledFiles = (project?.files || []).filter((file) => file.enabled).length;
+  const unreadableFiles = (project?.files || []).filter((file) => file.status !== 'indexed').length;
+  const backendName = modelStatus?.ai?.active_backend || 'none';
+  const modelName = modelStatus?.ai?.model || 'not configured';
+  const vectorProvider = modelStatus?.vector_store?.provider || modelStatus?.embeddings?.provider || 'local';
 
   if (!activeProjectId || !project) {
     return (
@@ -364,6 +668,13 @@ export default function ProjectWorkspace({
               const value = e.currentTarget.value;
               setDraft((prev) => ({ ...prev, instructions: value }));
             }} placeholder="Explain changes clearly, cite uploaded files, and produce runnable code when possible." />
+          </label>
+          <label className="field">
+            <span>Cover / Focus</span>
+            <input value={draft.cover} onChange={(e) => {
+              const value = e.currentTarget.value;
+              setDraft((prev) => ({ ...prev, cover: value }));
+            }} placeholder="Stress prediction research, code rewrites, paper notes" />
           </label>
           {error ? <div className="notice error">{error}</div> : null}
           <div className="formActions">
@@ -394,6 +705,7 @@ export default function ProjectWorkspace({
           <div>
             <h2>{project.name}</h2>
             <p>{project.description || 'Chat with this project, upload files, and create new work from its context.'}</p>
+            {project.cover ? <p className="projectCover">{project.cover}</p> : null}
           </div>
           <button className="btn secondary" type="button" onClick={() => setEditingSettings((value) => !value)}>
             Settings
@@ -423,13 +735,74 @@ export default function ProjectWorkspace({
                 setDraft((prev) => ({ ...prev, instructions: value }));
               }} />
             </label>
+            <label className="field">
+              <span>Cover / Focus</span>
+              <input value={draft.cover} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setDraft((prev) => ({ ...prev, cover: value }));
+              }} />
+            </label>
+            <label className="field">
+              <span>General Model</span>
+              <select value={draft.model_backend} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setDraft((prev) => ({ ...prev, model_backend: value }));
+              }}>
+                <option value="auto">Auto fallback</option>
+                <option value="groq">Groq</option>
+                <option value="ollama">Ollama</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="gemini">Gemini</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Coding Model</span>
+              <select value={draft.coding_model_backend} onChange={(e) => {
+                const value = e.currentTarget.value;
+                setDraft((prev) => ({ ...prev, coding_model_backend: value }));
+              }}>
+                <option value="auto">Auto fallback</option>
+                <option value="groq">Groq</option>
+                <option value="ollama">Ollama</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="gemini">Gemini</option>
+              </select>
+            </label>
             <div className="formActions">
               <button className="btn secondary" type="button" onClick={() => setEditingSettings(false)}>Cancel</button>
               <button className="btn primary" type="button" onClick={saveSettings} disabled={loading}>Save</button>
+              <button className="btn secondary" type="button" onClick={archiveProject} disabled={loading}>Archive</button>
               <button className="btn danger" type="button" onClick={deleteProject} disabled={loading}>Delete</button>
             </div>
           </div>
         ) : null}
+
+        <div className="projectDashboard">
+          <div className="projectStat">
+            <strong>{project.files?.length || 0}</strong>
+            <span>{enabledFiles} enabled files</span>
+          </div>
+          <div className="projectStat">
+            <strong>{project.memory?.length || 0}</strong>
+            <span>project memories</span>
+          </div>
+          <div className="projectStat">
+            <strong>{project.artifacts?.length || 0}</strong>
+            <span>generated artifacts</span>
+          </div>
+          <div className={modelStatus?.ai?.ready ? 'projectStat online' : 'projectStat warning'}>
+            <strong>{backendName}</strong>
+            <span>{modelName}</span>
+          </div>
+          <div className="projectStat">
+            <strong>{vectorProvider}</strong>
+            <span>{unreadableFiles ? `${unreadableFiles} unreadable files` : 'retrieval ready'}</span>
+          </div>
+          <div className="projectStat">
+            <strong>{conversationState?.latest_file_name || conversationState?.latest_artifact_title || 'none'}</strong>
+            <span>continuity target</span>
+          </div>
+        </div>
 
         <div className="chat projectChat">
           {!messages.length ? (
@@ -444,6 +817,7 @@ export default function ProjectWorkspace({
               <div className="bubbleText">{message.content}</div>
               {message.sources?.length ? (
                 <div className="sourceChips">
+                  <strong>Used sources</strong>
                   {message.sources.slice(0, 5).map((source: any, i: number) => (
                     <span key={i}>{source.citation || source.title || source.source}</span>
                   ))}
@@ -493,6 +867,12 @@ export default function ProjectWorkspace({
             <button className="btn primary" type="button" onClick={sendMessage} disabled={loading || !instruction.trim()}>
               Send
             </button>
+            <button className="btn secondary" type="button" onClick={retryLastMessage} disabled={loading || !lastUserInstruction}>
+              Retry Last
+            </button>
+            <button className="btn secondary" type="button" onClick={continueGeneration} disabled={loading}>
+              Continue
+            </button>
           </div>
           {files.length ? (
             <div className="filePreview">
@@ -505,7 +885,7 @@ export default function ProjectWorkspace({
 
       <aside className="projectSide">
         <div className="sideTabs">
-          {(['files', 'memory', 'sources', 'artifacts'] as const).map((tab) => (
+          {(['files', 'memory', 'sources', 'artifacts', 'continuity'] as const).map((tab) => (
             <button key={tab} className={sideTab === tab ? 'active' : ''} type="button" onClick={() => setSideTab(tab)}>
               {tab[0].toUpperCase() + tab.slice(1)}
             </button>
@@ -517,7 +897,19 @@ export default function ProjectWorkspace({
           <div className="panelHeader">
             <h2>Files</h2>
           </div>
-          <div className="projectFileUpload">
+          <div
+            className={draggingFiles ? 'projectFileUpload dragging' : 'projectFileUpload'}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDraggingFiles(true);
+            }}
+            onDragLeave={() => setDraggingFiles(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDraggingFiles(false);
+              addDroppedFiles(e.dataTransfer.files);
+            }}
+          >
             <input
               ref={projectFileInputRef}
               className="fileInput"
@@ -536,7 +928,7 @@ export default function ProjectWorkspace({
                 {files.map((file) => <span className="fileChip" key={file.name}>{file.name}</span>)}
               </div>
             ) : (
-              <div className="hint">Uploaded files stay with this project and are used in future project chat.</div>
+              <div className="hint">Drop files here or choose files. Uploaded files stay with this project and are used in future project chat.</div>
             )}
           </div>
           <div className="ragSourceList">
@@ -550,12 +942,37 @@ export default function ProjectWorkspace({
                   <button className="btn secondary" type="button" onClick={() => toggleFile(file)} disabled={loading}>
                     {file.enabled ? 'Disable' : 'Enable'}
                   </button>
+                  <button className="btn secondary" type="button" onClick={() => useOnlyFile(file)} disabled={loading}>
+                    Only Use This
+                  </button>
+                  <button className="btn secondary" type="button" onClick={() => showFileDetail(file)} disabled={loading}>
+                    Preview
+                  </button>
                   <button className="btn secondary" type="button" onClick={() => removeFile(file.id)} disabled={loading}>Remove</button>
                 </div>
               </div>
             ))}
             {!project.files?.length ? <div className="emptyState">No project files yet.</div> : null}
           </div>
+          {fileDetail ? (
+            <div className="fileDetail">
+              <div className="panelHeader">
+                <h2>{fileDetail.file?.filename || 'File preview'}</h2>
+                <button className="btn secondary" type="button" onClick={() => setFileDetail(null)}>Close</button>
+              </div>
+              <pre>{fileDetail.preview || 'No readable text extracted.'}</pre>
+              {fileDetail.chunks?.length ? (
+                <div className="chunkList">
+                  {fileDetail.chunks.slice(0, 8).map((chunk: any) => (
+                    <div className="chunkRow" key={chunk.index}>
+                      <strong>Chunk {chunk.index}</strong>
+                      <p>{chunk.text}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         ) : null}
 
@@ -566,13 +983,22 @@ export default function ProjectWorkspace({
           </div>
           <div className="sideForm">
             <textarea value={memoryDraft} onChange={(e) => setMemoryDraft(e.currentTarget.value)} placeholder="Add a fact, preference, or decision for this project" />
-            <button className="btn primary" type="button" onClick={addMemory} disabled={loading || !memoryDraft.trim()}>Remember</button>
+            <button className="btn primary" type="button" onClick={addMemory} disabled={loading || !memoryDraft.trim()}>
+              {editingMemoryId ? 'Update Memory' : 'Remember'}
+            </button>
+            {editingMemoryId ? (
+              <button className="btn secondary" type="button" onClick={() => {
+                setEditingMemoryId(null);
+                setMemoryDraft('');
+              }}>Cancel Edit</button>
+            ) : null}
           </div>
           <div className="ragSourceList">
             {(project.memory || []).map((item) => (
               <div className="sourceRow" key={item.id}>
                 <strong>{item.content}</strong>
                 <span>{item.kind || 'note'} · {item.created_at || ''}</span>
+                <button className="btn secondary" type="button" onClick={() => editMemory(item)} disabled={loading}>Edit</button>
                 <button className="btn secondary" type="button" onClick={() => removeMemory(item.id)} disabled={loading}>Forget</button>
               </div>
             ))}
@@ -609,14 +1035,129 @@ export default function ProjectWorkspace({
           <div className="panelHeader">
             <h2>Artifacts</h2>
           </div>
+          {artifactNotice ? <div className="notice">{artifactNotice}</div> : null}
           <div className="ragSourceList">
             {(project.artifacts || []).map((artifact) => (
-              <div className="sourceRow" key={artifact.id}>
-                <strong>{artifact.title}</strong>
-                <span>{artifact.type} · {artifact.created_at || ''}</span>
+              <div className="artifactRow" key={artifact.id}>
+                <div>
+                  <input
+                    className="artifactTitleInput"
+                    value={(artifactDrafts[artifact.id]?.title ?? artifact.title)}
+                    onChange={(e) => {
+                      const value = e.currentTarget.value;
+                      setArtifactDrafts((prev) => ({
+                        ...prev,
+                        [artifact.id]: { title: value, content: prev[artifact.id]?.content ?? artifact.content },
+                      }));
+                    }}
+                  />
+                  <span>{artifact.type} · {artifact.created_at || ''}{artifact.is_final ? ' · final' : ''}</span>
+                </div>
+                <textarea
+                  className="artifactEditor"
+                  value={(artifactDrafts[artifact.id]?.content ?? artifact.content)}
+                  onChange={(e) => {
+                    const value = e.currentTarget.value;
+                    setArtifactDrafts((prev) => ({
+                      ...prev,
+                      [artifact.id]: { title: prev[artifact.id]?.title ?? artifact.title, content: value },
+                    }));
+                  }}
+                />
+                <div className="sourceActions">
+                  <button className="btn primary" type="button" onClick={() => saveArtifact(artifact)} disabled={loading}>
+                    Save
+                  </button>
+                  <button className="btn secondary" type="button" onClick={() => markArtifactFinal(artifact)} disabled={loading}>
+                    {artifact.is_final ? 'Unmark Final' : 'Mark Final'}
+                  </button>
+                  {artifact.type === 'code' ? (
+                    <>
+                      <button className="btn secondary" type="button" onClick={() => checkArtifact(artifact)} disabled={loading}>
+                        Check
+                      </button>
+                      <button className="btn secondary" type="button" onClick={() => repairArtifact(artifact)} disabled={loading}>
+                        Repair
+                      </button>
+                      <button className="btn secondary" type="button" onClick={() => runArtifact(artifact)} disabled={loading}>
+                        Run
+                      </button>
+                    </>
+                  ) : null}
+                  <button className="btn secondary" type="button" onClick={() => loadArtifactVersions(artifact)} disabled={loading}>
+                    Versions
+                  </button>
+                  <button className="btn secondary" type="button" onClick={() => copyArtifact(artifact)} disabled={!artifact.content}>
+                    Copy
+                  </button>
+                  <button className="btn secondary" type="button" onClick={() => downloadArtifact(artifact)} disabled={!artifact.content}>
+                    Download
+                  </button>
+                  <button className="btn danger" type="button" onClick={() => deleteArtifact(artifact)} disabled={loading}>
+                    Delete
+                  </button>
+                </div>
+                {artifactRuns[artifact.id] ? (
+                  <div className={artifactRuns[artifact.id].success ? 'runOutput success' : 'runOutput error'}>
+                    <strong>{artifactRuns[artifact.id].success ? 'Run passed' : 'Run failed'}</strong>
+                    <span>Exit code: {String(artifactRuns[artifact.id].returncode ?? 'timeout')}</span>
+                    {artifactRuns[artifact.id].stdout ? <pre>{artifactRuns[artifact.id].stdout}</pre> : null}
+                    {artifactRuns[artifact.id].stderr ? <pre>{artifactRuns[artifact.id].stderr}</pre> : null}
+                  </div>
+                ) : null}
+                {artifactVersions[artifact.id]?.length ? (
+                  <div className="versionList">
+                    {artifactVersions[artifact.id].map((version: any) => (
+                      <details key={version.id}>
+                        <summary>{version.created_at || 'Saved version'} {version.note ? `· ${version.note}` : ''}</summary>
+                        <pre>{version.content}</pre>
+                      </details>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             ))}
             {!project.artifacts?.length ? <div className="emptyState">Generated documents will appear here.</div> : null}
+          </div>
+        </div>
+        ) : null}
+
+        {sideTab === 'continuity' ? (
+        <div className="panel">
+          <div className="panelHeader">
+            <h2>Continuity</h2>
+          </div>
+          <div className="continuityPanel">
+            <div className="sourceRow">
+              <strong>Current goal</strong>
+              <span>{conversationState?.current_goal || 'No goal inferred yet.'}</span>
+            </div>
+            <div className="sourceRow">
+              <strong>Latest file</strong>
+              <span>{conversationState?.latest_file_name || 'No file referenced yet.'}</span>
+            </div>
+            <div className="sourceRow">
+              <strong>Latest artifact</strong>
+              <span>{conversationState?.latest_artifact_title || 'No artifact generated yet.'}</span>
+            </div>
+            <div className="sourceRow">
+              <strong>Latest action</strong>
+              <span>{conversationState?.latest_action || 'No action yet.'}</span>
+            </div>
+            <div className="sourceRow">
+              <strong>User preferences</strong>
+              {(conversationState?.user_preferences || []).map((item) => <span key={item}>{item}</span>)}
+              {!conversationState?.user_preferences?.length ? <span>No preferences inferred yet.</span> : null}
+            </div>
+            <div className="sourceRow">
+              <strong>Open tasks</strong>
+              {(conversationState?.open_tasks || []).map((item) => <span key={item}>{item}</span>)}
+              {!conversationState?.open_tasks?.length ? <span>No open tasks inferred yet.</span> : null}
+            </div>
+            <div className="sourceRow">
+              <strong>Summary</strong>
+              <p>{conversationState?.summary || 'Conversation summary will appear after project chat.'}</p>
+            </div>
           </div>
         </div>
         ) : null}

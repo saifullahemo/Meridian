@@ -22,6 +22,9 @@ class ProjectUpdateRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     instructions: str | None = None
+    cover: str | None = None
+    model_backend: str | None = None
+    coding_model_backend: str | None = None
     archived: bool | None = None
 
 
@@ -38,6 +41,18 @@ class ProjectMemoryRequest(BaseModel):
     kind: str = "note"
 
 
+class ProjectArtifactUpdateRequest(BaseModel):
+    title: str | None = None
+    type: str | None = None
+    content: str | None = None
+    is_final: bool | None = None
+    note: str = ""
+
+
+class ProjectArtifactRunRequest(BaseModel):
+    timeout_seconds: int = 20
+
+
 class ProjectQueryRequest(BaseModel):
     query: str
     top_k: int = 5
@@ -45,8 +60,12 @@ class ProjectQueryRequest(BaseModel):
 
 
 @router.get("")
-def list_projects(_authorized: bool = Depends(require_api_key)):
-    return {"success": True, "projects": projects.list_projects()}
+def list_projects(
+    include_archived: bool = Query(default=False),
+    search: str = Query(default=""),
+    _authorized: bool = Depends(require_api_key),
+):
+    return {"success": True, "projects": projects.list_projects(include_archived=include_archived, search=search)}
 
 
 @router.post("")
@@ -97,6 +116,15 @@ def project_history(project_id: int, _authorized: bool = Depends(require_api_key
     try:
         projects.get_project(project_id)
         return {"success": True, "history": projects.get_history(project_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.get("/{project_id}/conversation-state")
+def project_conversation_state(project_id: int, _authorized: bool = Depends(require_api_key)):
+    try:
+        projects.get_project(project_id)
+        return {"success": True, "state": projects.get_conversation_state(project_id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -154,6 +182,14 @@ def list_project_files(project_id: int, _authorized: bool = Depends(require_api_
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
+@router.get("/{project_id}/files/{file_id}")
+def get_project_file(project_id: int, file_id: int, _authorized: bool = Depends(require_api_key)):
+    try:
+        return {"success": True, **projects.get_file_detail(project_id, file_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
 @router.post("/{project_id}/files")
 async def upload_project_files(
     project_id: int,
@@ -197,6 +233,74 @@ def project_artifacts(project_id: int, _authorized: bool = Depends(require_api_k
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
+@router.get("/{project_id}/artifacts/{artifact_id}/check")
+def check_project_artifact(project_id: int, artifact_id: int, _authorized: bool = Depends(require_api_key)):
+    try:
+        result = projects.check_artifact(project_id, artifact_id)
+        return {"success": True, **result}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.put("/{project_id}/artifacts/{artifact_id}")
+def update_project_artifact(
+    project_id: int,
+    artifact_id: int,
+    req: ProjectArtifactUpdateRequest,
+    _authorized: bool = Depends(require_api_key),
+):
+    try:
+        patch = req.dict(exclude_none=True)
+        return {"success": True, "artifact": projects.update_artifact(project_id, artifact_id, patch)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/{project_id}/artifacts/{artifact_id}/versions")
+def project_artifact_versions(project_id: int, artifact_id: int, _authorized: bool = Depends(require_api_key)):
+    try:
+        return {"success": True, "versions": projects.list_artifact_versions(project_id, artifact_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.post("/{project_id}/artifacts/{artifact_id}/repair")
+def repair_project_artifact(
+    project_id: int,
+    artifact_id: int,
+    req: ProjectChatRequest,
+    _authorized: bool = Depends(require_api_key),
+):
+    try:
+        return {"success": True, **projects.repair_artifact(project_id, artifact_id, req.instruction)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ConnectionError as e:
+        raise _model_backend_error(e) from e
+
+
+@router.post("/{project_id}/artifacts/{artifact_id}/run")
+def run_project_artifact(
+    project_id: int,
+    artifact_id: int,
+    req: ProjectArtifactRunRequest,
+    _authorized: bool = Depends(require_api_key),
+):
+    try:
+        return {"success": True, "run": projects.run_artifact(project_id, artifact_id, req.timeout_seconds)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.delete("/{project_id}/artifacts/{artifact_id}")
+def delete_project_artifact(project_id: int, artifact_id: int, _authorized: bool = Depends(require_api_key)):
+    try:
+        projects.delete_artifact(project_id, artifact_id)
+        return {"success": True, "message": "Artifact deleted."}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
 @router.get("/{project_id}/memory")
 def project_memory(project_id: int, _authorized: bool = Depends(require_api_key)):
     try:
@@ -216,6 +320,19 @@ def add_project_memory(
         return {"success": True, "memory": projects.add_memory(project_id, req.content, req.kind)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.put("/{project_id}/memory/{memory_id}")
+def update_project_memory(
+    project_id: int,
+    memory_id: int,
+    req: ProjectMemoryRequest,
+    _authorized: bool = Depends(require_api_key),
+):
+    try:
+        return {"success": True, "memory": projects.update_memory(project_id, memory_id, req.content, req.kind)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @router.delete("/{project_id}/memory/{memory_id}")

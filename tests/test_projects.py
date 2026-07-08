@@ -100,6 +100,68 @@ def test_project_chat_prompt_includes_project_context(tmp_path, monkeypatch):
     assert "Rewrite the code I uploaded earlier" in captured["prompt"]
 
 
+def test_project_conversation_state_is_saved_and_injected(tmp_path, monkeypatch):
+    _use_tmp_project_db(monkeypatch, tmp_path)
+    prompts = []
+
+    def fake_ask(prompt, **kwargs):
+        prompts.append(prompt)
+        return "Use RandomForestClassifier and avoid placeholders."
+
+    monkeypatch.setattr(project_core.brain, "ask", fake_ask)
+    monkeypatch.setattr(project_core, "retrieve_project_sources", lambda *args, **kwargs: [])
+
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={"name": "Continuity"}).json()["project"]["id"]
+
+    first = client.post(
+        f"/api/projects/{project_id}/chat",
+        data={"instruction": "I want complete runnable code for random forest, no placeholders"},
+    )
+    state = client.get(f"/api/projects/{project_id}/conversation-state")
+    second = client.post(f"/api/projects/{project_id}/chat", data={"instruction": "continue"})
+
+    assert first.status_code == 200
+    assert state.status_code == 200
+    body = state.json()["state"]
+    assert body["current_goal"] == "Work on a Random Forest version of the uploaded code."
+    assert "complete runnable code" in body["user_preferences"][0]
+    assert second.status_code == 200
+    assert "Conversation state:" in prompts[-1]
+    assert "Current goal: Work on a Random Forest version" in prompts[-1]
+
+
+def test_project_previous_file_reference_uses_conversation_state(tmp_path, monkeypatch):
+    _use_tmp_project_db(monkeypatch, tmp_path)
+    prompts = []
+
+    def fake_ask(prompt, **kwargs):
+        prompts.append(prompt)
+        if "complete rewritten implementation" in prompt:
+            return "```python\nfrom sklearn.ensemble import RandomForestClassifier\nprint('ok')\n```"
+        return "summary"
+
+    monkeypatch.setattr(project_core.brain, "ask", fake_ask)
+
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={"name": "Previous File"}).json()["project"]["id"]
+    uploaded = client.post(
+        f"/api/projects/{project_id}/files",
+        files={"files": ("model.ipynb", b'{"cells":[{"cell_type":"code","source":["from catboost import CatBoostClassifier\\n"]}]}', "application/x-ipynb+json")},
+    )
+    file_id = uploaded.json()["files"][0]["id"]
+    project_core.update_conversation_state(project_id, {"latest_file_id": file_id, "latest_file_name": "model.ipynb"})
+
+    response = client.post(
+        f"/api/projects/{project_id}/chat",
+        data={"instruction": "rewrite the previous file for random forest"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["action"] == "project_file_rewrite"
+    assert "model.ipynb" in prompts[-1]
+
+
 def test_project_memory_and_actions(tmp_path, monkeypatch):
     _use_tmp_project_db(monkeypatch, tmp_path)
     monkeypatch.setattr(project_core.brain, "ask", lambda *args, **kwargs: "normal answer")
@@ -564,6 +626,133 @@ def test_project_code_completeness_check_is_direct(tmp_path, monkeypatch):
     assert body["action"] == "project_code_check"
     assert "Short answer: no" in body["message"]
     assert "mmash_dataset.csv" in body["message"]
+
+
+def test_project_artifact_check_endpoint_reports_quality(tmp_path, monkeypatch):
+    _use_tmp_project_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(project_core.brain, "ask", lambda *args, **kwargs: "summary")
+
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={"name": "Artifact Check"}).json()["project"]["id"]
+    artifact = project_core._create_project_artifact(
+        project_id,
+        "Random Forest rewrite - bad.py",
+        "code",
+        "```python\nimport pandas as pd\ndata = pd.read_csv('mmash_dataset.csv')\n```",
+    )
+
+    response = client.get(f"/api/projects/{project_id}/artifacts/{artifact['id']}/check")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["code_quality"]["ok"] is False
+    assert "Short answer: no" in body["message"]
+    assert "mmash_dataset.csv" in body["message"]
+
+
+def test_project_artifact_delete_endpoint_removes_artifact(tmp_path, monkeypatch):
+    _use_tmp_project_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(project_core.brain, "ask", lambda *args, **kwargs: "summary")
+
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={"name": "Artifact Delete"}).json()["project"]["id"]
+    artifact = project_core._create_project_artifact(project_id, "Draft", "document", "content")
+
+    deleted = client.delete(f"/api/projects/{project_id}/artifacts/{artifact['id']}")
+    listed = client.get(f"/api/projects/{project_id}/artifacts")
+
+    assert deleted.status_code == 200
+    assert listed.status_code == 200
+    assert listed.json()["artifacts"] == []
+
+
+def test_project_search_archive_and_model_preference(tmp_path, monkeypatch):
+    _use_tmp_project_db(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_ask(prompt, **kwargs):
+        captured.update(kwargs)
+        return "answer"
+
+    monkeypatch.setattr(project_core.brain, "ask", fake_ask)
+    monkeypatch.setattr(project_core, "retrieve_project_sources", lambda *args, **kwargs: [])
+
+    client = TestClient(app)
+    project_id = client.post(
+        "/api/projects",
+        json={"name": "Model Choice", "description": "Python project"},
+    ).json()["project"]["id"]
+
+    updated = client.put(
+        f"/api/projects/{project_id}",
+        json={"model_backend": "gemini", "coding_model_backend": "openrouter", "cover": "Code research"},
+    )
+    found = client.get("/api/projects?search=model")
+    archived = client.put(f"/api/projects/{project_id}", json={"archived": True})
+    hidden = client.get("/api/projects")
+    visible = client.get("/api/projects?include_archived=true")
+
+    assert updated.status_code == 200
+    assert updated.json()["project"]["model_backend"] == "gemini"
+    assert updated.json()["project"]["cover"] == "Code research"
+    assert found.json()["projects"][0]["id"] == project_id
+    assert archived.json()["project"]["archived"] is True
+    assert hidden.json()["projects"] == []
+    assert visible.json()["projects"][0]["id"] == project_id
+
+    client.put(f"/api/projects/{project_id}", json={"archived": False})
+    chat = client.post(f"/api/projects/{project_id}/chat", data={"instruction": "hello"})
+
+    assert chat.status_code == 200
+    assert captured["preferred_backend"] == "gemini"
+
+
+def test_project_file_detail_returns_preview_and_chunks(tmp_path, monkeypatch):
+    _use_tmp_project_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(project_core.brain, "ask", lambda *args, **kwargs: "summary")
+
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={"name": "File Detail"}).json()["project"]["id"]
+    file_info = client.post(
+        f"/api/projects/{project_id}/files",
+        files={"files": ("notes.txt", b"alpha beta gamma " * 250, "text/plain")},
+    ).json()["files"][0]
+
+    response = client.get(f"/api/projects/{project_id}/files/{file_info['id']}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "alpha beta gamma" in body["preview"]
+    assert body["chunks"]
+
+
+def test_project_artifact_update_versions_and_run(tmp_path, monkeypatch):
+    _use_tmp_project_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(project_core.brain, "ask", lambda *args, **kwargs: "summary")
+
+    client = TestClient(app)
+    project_id = client.post("/api/projects", json={"name": "Artifact Workflow"}).json()["project"]["id"]
+    artifact = project_core._create_project_artifact(
+        project_id,
+        "hello.py",
+        "code",
+        "```python\nprint('old')\n```",
+    )
+
+    updated = client.put(
+        f"/api/projects/{project_id}/artifacts/{artifact['id']}",
+        json={"content": "```python\nprint('new')\n```", "is_final": True, "note": "manual edit"},
+    )
+    versions = client.get(f"/api/projects/{project_id}/artifacts/{artifact['id']}/versions")
+    run = client.post(f"/api/projects/{project_id}/artifacts/{artifact['id']}/run", json={"timeout_seconds": 5})
+
+    assert updated.status_code == 200
+    assert updated.json()["artifact"]["is_final"] is True
+    assert versions.status_code == 200
+    assert "old" in versions.json()["versions"][0]["content"]
+    assert run.status_code == 200
+    assert run.json()["run"]["success"] is True
+    assert "new" in run.json()["run"]["stdout"]
 
 
 def test_project_simple_explanation_uses_plain_language(tmp_path, monkeypatch):

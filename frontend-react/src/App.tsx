@@ -40,6 +40,7 @@ type ProjectSummary = {
   name: string;
   description?: string;
   instructions?: string;
+  archived?: boolean;
   file_count?: number;
   artifact_count?: number;
 };
@@ -93,6 +94,10 @@ export default function App() {
   const [activeProjectId, setActiveProjectId] = useState<number | null>(null);
   const [statusText, setStatusText] = useState('Checking');
   const [notice, setNotice] = useState<string | null>(null);
+  const [projectSearch, setProjectSearch] = useState('');
+  const [showArchivedProjects, setShowArchivedProjects] = useState(false);
+  const [renamingProjectId, setRenamingProjectId] = useState<number | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
 
   const apiBase = useMemo(() => {
     return import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
@@ -112,11 +117,40 @@ export default function App() {
   }, [api]);
 
   const refreshProjects = useCallback(async () => {
+    const params = new URLSearchParams();
+    if (projectSearch.trim()) params.set('search', projectSearch.trim());
+    if (showArchivedProjects) params.set('include_archived', 'true');
     const json = await readJson<{ projects: ProjectSummary[] }>(
-      await fetch(api('/api/projects')),
+      await fetch(api(`/api/projects?${params.toString()}`)),
     );
     setProjects(Array.isArray(json.projects) ? json.projects : []);
-  }, [api]);
+  }, [api, projectSearch, showArchivedProjects]);
+
+  async function renameProject(project: ProjectSummary) {
+    if (!renameDraft.trim()) return;
+    await readJson(
+      await fetch(api(`/api/projects/${project.id}`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: renameDraft.trim() }),
+      }),
+    );
+    setRenamingProjectId(null);
+    setRenameDraft('');
+    await refreshProjects();
+  }
+
+  async function archiveProject(project: ProjectSummary) {
+    await readJson(
+      await fetch(api(`/api/projects/${project.id}`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ archived: !project.archived }),
+      }),
+    );
+    if (activeProjectId === project.id && !project.archived) setActiveProjectId(null);
+    await refreshProjects();
+  }
 
   useEffect(() => {
     localStorage.setItem('po_session_id', sessionId);
@@ -175,19 +209,53 @@ export default function App() {
 
         <div className="moduleRail">
           <div className="railLabel">Projects</div>
+          <input
+            className="railSearch"
+            value={projectSearch}
+            onChange={(e) => setProjectSearch(e.currentTarget.value)}
+            placeholder="Search projects"
+          />
+          <label className="railToggle">
+            <input
+              type="checkbox"
+              checked={showArchivedProjects}
+              onChange={(e) => setShowArchivedProjects(e.currentTarget.checked)}
+            />
+            <span>Show archived</span>
+          </label>
           {projects.map((project) => (
-            <button
-              key={project.id}
-              className={activeProjectId === project.id && mode === 'data' ? 'moduleButton active' : 'moduleButton'}
-              type="button"
-              onClick={() => {
-                setActiveProjectId(project.id);
-                setMode('data');
-              }}
-            >
-              <span>{project.name}</span>
-              <strong>{project.file_count || 0}</strong>
-            </button>
+            <div className={activeProjectId === project.id && mode === 'data' ? 'moduleButtonWrap active' : 'moduleButtonWrap'} key={project.id}>
+              {renamingProjectId === project.id ? (
+                <form className="railRename" onSubmit={(e) => {
+                  e.preventDefault();
+                  renameProject(project).catch((err) => setNotice(String(err.message || err)));
+                }}>
+                  <input value={renameDraft} onChange={(e) => setRenameDraft(e.currentTarget.value)} />
+                  <button type="submit">Save</button>
+                </form>
+              ) : (
+                <button
+                  className="moduleButton"
+                  type="button"
+                  onClick={() => {
+                    setActiveProjectId(project.id);
+                    setMode('data');
+                  }}
+                >
+                  <span>{project.name}{project.archived ? ' (archived)' : ''}</span>
+                  <strong>{project.file_count || 0}</strong>
+                </button>
+              )}
+              <div className="railActions">
+                <button type="button" onClick={() => {
+                  setRenamingProjectId(project.id);
+                  setRenameDraft(project.name);
+                }}>Rename</button>
+                <button type="button" onClick={() => archiveProject(project).catch((err) => setNotice(String(err.message || err)))}>
+                  {project.archived ? 'Restore' : 'Archive'}
+                </button>
+              </div>
+            </div>
           ))}
           <button
             className={mode === 'data' && !activeProjectId ? 'moduleButton active' : 'moduleButton'}
@@ -269,6 +337,8 @@ function DataView({
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('All');
+  const [sortBy, setSortBy] = useState('created_at');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<Record<string, string | number | boolean>>({});
@@ -292,6 +362,8 @@ function DataView({
       const params = new URLSearchParams();
       if (search) params.set('search', search);
       if (status !== 'All') params.set('status', status);
+      if (sortBy) params.set('sort_by', sortBy);
+      params.set('sort_dir', sortDir);
       const json = await readJson<{ records: RecordRow[] }>(
         await fetch(api(`/api/modules/${moduleKey}/records?${params.toString()}`)),
       );
@@ -301,7 +373,7 @@ function DataView({
     } finally {
       setLoading(false);
     }
-  }, [api, moduleKey, search, status]);
+  }, [api, moduleKey, search, status, sortBy, sortDir]);
 
   useEffect(() => {
     setForm({});
@@ -345,6 +417,27 @@ function DataView({
     } catch (e: any) {
       setError(String(e.message || e));
     }
+  }
+
+  async function importCsv(file: File | null) {
+    if (!file || !moduleKey) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      await readJson(await fetch(api(`/api/modules/${moduleKey}/records/import`), { method: 'POST', body: fd }));
+      await loadRecords();
+      await onChanged();
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function exportCsv() {
+    window.location.href = api(`/api/modules/${moduleKey}/records/export`);
   }
 
   function openModuleEditor(createNew = false) {
@@ -497,11 +590,24 @@ function DataView({
             {statusField.options?.map((option) => <option key={option}>{option}</option>)}
           </select>
         ) : null}
+        <select value={sortBy} onChange={(e) => setSortBy(e.currentTarget.value)}>
+          <option value="created_at">Newest</option>
+          {schema.fields.map((field) => <option key={field.name} value={field.name}>{formatLabel(field.name)}</option>)}
+        </select>
+        <select value={sortDir} onChange={(e) => setSortDir(e.currentTarget.value as 'asc' | 'desc')}>
+          <option value="desc">Desc</option>
+          <option value="asc">Asc</option>
+        </select>
         <button className="btn primary" type="button" onClick={() => setShowForm((value) => !value)}>
           {showForm ? 'Close' : 'Add'}
         </button>
         <button className="btn secondary" type="button" onClick={() => openModuleEditor(false)}>Edit Tracker</button>
         <button className="btn secondary" type="button" onClick={() => openModuleEditor(true)}>New Tracker</button>
+        <button className="btn secondary" type="button" onClick={exportCsv}>Export CSV</button>
+        <label className="btn secondary fileButton">
+          Import CSV
+          <input type="file" accept=".csv" onChange={(e) => importCsv(e.currentTarget.files?.[0] || null)} />
+        </label>
       </div>
 
       <div className="metricGrid">

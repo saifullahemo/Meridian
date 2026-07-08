@@ -116,6 +116,7 @@ def ask(
     temperature: float = 0.7,
     max_tokens: int = 2048,
     max_output_chars: int | None = None,
+    preferred_backend: str | None = None,
 ) -> str:
 
     """Send a prompt and return the full response as a string."""
@@ -125,7 +126,11 @@ def ask(
     errors = []
     result = ""
     backend = ""
-    for candidate in _available_backends():
+    try:
+        candidates = _available_backends(preferred_backend)
+    except TypeError:
+        candidates = _available_backends()
+    for candidate in candidates:
         try:
             backend = candidate
             if candidate == "groq":
@@ -270,13 +275,19 @@ def ask_with_history(
 # Backend selection
 # ------------------------------
 
-def _available_backends() -> list[str]:
+def _available_backends(preferred_backend: str | None = None) -> list[str]:
     backend_checks = {
         "groq": is_groq_available,
         "ollama": is_ollama_available,
         "openrouter": is_openrouter_available,
         "gemini": is_gemini_available,
     }
+    preferred = (preferred_backend or "").strip().lower()
+    if preferred and preferred != "auto":
+        checker = backend_checks.get(preferred)
+        if checker and checker():
+            remaining = [backend for backend in _available_backends(None) if backend != preferred]
+            return [preferred, *remaining]
     if MODEL_BACKEND != "auto":
         checker = backend_checks.get(MODEL_BACKEND)
         return [MODEL_BACKEND] if checker and checker() else []
